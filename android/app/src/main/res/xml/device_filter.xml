@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- RP2040 typically shows up with these vendor/product IDs when running CircuitPython or Arduino -->
+    <usb-device vendor-id="11914" product-id="10" />  <!-- Raspberry Pi vendor ID -->
+    <usb-device vendor-id="9114" product-id="32823" />  <!-- Alternative IDs -->
+</resources>
