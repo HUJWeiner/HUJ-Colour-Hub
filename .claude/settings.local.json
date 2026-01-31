@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(move:*)",
+      "Bash(flutter clean:*)",
+      "Bash(flutter pub:*)",
+      "WebFetch(domain:gitlab.com)",
+      "Bash(flutter build:*)",
+      "Bash(git checkout:*)",
+      "Bash(flutter analyze:*)"
+    ]
+  }
+}

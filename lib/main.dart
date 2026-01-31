@@ -20,22 +20,25 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Color Pattern Creator',
+      title: 'LED Control',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.deepPurple,
+          seedColor: const Color(0xFF6366F1),
           brightness: Brightness.dark,
         ),
+        scaffoldBackgroundColor: const Color(0xFF0F0F0F),
+        fontFamily: 'Raleway',
         cardTheme: CardThemeData(
           elevation: 0,
+          color: const Color(0xFF1A1A1A),
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
+            borderRadius: BorderRadius.circular(20),
           ),
         ),
       ),
-      home: const ColorPatternScreen(),
+      home: const MainNavigationScreen(),
     );
   }
 }
@@ -54,77 +57,98 @@ class SavedPattern {
   });
 
   Map<String, dynamic> toJson() => {
-    'name': name,
-    'colors': colors.map((c) => c.value).toList(),
-    'transition': transition,
-    'savedAt': savedAt.toIso8601String(),
-  };
+        'name': name,
+        'colors': colors.map((c) => c.value).toList(),
+        'transition': transition,
+        'savedAt': savedAt.toIso8601String(),
+      };
 
   factory SavedPattern.fromJson(Map<String, dynamic> json) => SavedPattern(
-    name: json['name'],
-    colors: (json['colors'] as List).map((c) => Color(c as int)).toList(),
-    transition: json['transition'],
-    savedAt: DateTime.parse(json['savedAt']),
-  );
+        name: json['name'],
+        colors: (json['colors'] as List).map((c) => Color(c as int)).toList(),
+        transition: json['transition'],
+        savedAt: DateTime.parse(json['savedAt']),
+      );
 }
 
-class ColorPatternScreen extends StatefulWidget {
-  const ColorPatternScreen({super.key});
-
-  @override
-  State<ColorPatternScreen> createState() => _ColorPatternScreenState();
-}
-
-class _ColorPatternScreenState extends State<ColorPatternScreen>
-    with SingleTickerProviderStateMixin {
-  List<Color> colorPattern = [];
+// Global state management for USB connection
+class DeviceState extends ChangeNotifier {
   UsbPort? _port;
   UsbDevice? _device;
   bool _isConnected = false;
   bool _isConnecting = false;
-  bool _isReading = false;
-  late AnimationController _pulseController;
+  bool _showConnecting = false;
+  StreamSubscription<UsbEvent>? _usbSubscription;
   StreamSubscription<Uint8List>? _dataSubscription;
   String _incomingData = '';
-  
-  // Transition types
-  String _selectedTransition = 'instant';
-  final List<Map<String, String>> _transitions = [
-    {'id': 'instant', 'name': 'Instant', 'icon': '⚡'},
-    {'id': 'fade', 'name': 'Fade', 'icon': '🌊'},
-    {'id': 'wipe', 'name': 'Wipe', 'icon': '➡️'},
-    {'id': 'pulse', 'name': 'Pulse', 'icon': '💫'},
+  List<Color> _currentPatternColours = [
+    Colors.red,
+    Colors.orange,
+    Colors.yellow,
+    Colors.green,
+    Colors.cyan,
+    Colors.blue,
+    Colors.purple,
+    Colors.pink,
   ];
-  
-  // Pattern management
-  List<SavedPattern> _savedPatterns = [];
-  
-  // USB monitoring
-  StreamSubscription<UsbEvent>? _usbSubscription;
+  SavedPattern? _currentChipPattern;
+  SavedPattern? _patternToCopy;
 
-  @override
-  void initState() {
-    super.initState();
-    _pulseController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1500),
-    )..repeat(reverse: true);
-    
-    // Listen for USB device events (attach/detach)
-    _startUsbMonitoring();
-    
-    // Load saved patterns
-    _loadSavedPatterns();
+  bool get isConnected => _isConnected;
+  bool get isConnecting => _isConnecting && _showConnecting;
+  UsbPort? get port => _port;
+  List<Color> get currentPatternColours => _currentPatternColours;
+  SavedPattern? get currentChipPattern => _currentChipPattern;
+  SavedPattern? get patternToCopy => _patternToCopy;
+
+  void updatePatternColours(List<Color> colours) {
+    if (colours.isNotEmpty) {
+      _currentPatternColours = colours;
+      notifyListeners();
+    }
   }
-  
-  void _startUsbMonitoring() {
+
+  void setPatternToCopy(SavedPattern? pattern) {
+    _patternToCopy = pattern;
+    notifyListeners();
+  }
+
+  Future<void> _saveChipPattern() async {
+    if (_currentChipPattern == null) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('current_chip_pattern', jsonEncode(_currentChipPattern!.toJson()));
+  }
+
+  Future<void> loadChipPattern() async {
+    final prefs = await SharedPreferences.getInstance();
+    final patternJson = prefs.getString('current_chip_pattern');
+
+    if (patternJson != null) {
+      try {
+        _currentChipPattern = SavedPattern.fromJson(jsonDecode(patternJson));
+        notifyListeners();
+      } catch (e) {
+        // Invalid pattern data, ignore
+      }
+    }
+  }
+
+  void startUsbMonitoring() {
     if (kIsWeb || !Platform.isAndroid) return;
-    
+
     try {
       _usbSubscription = UsbSerial.usbEventStream?.listen((UsbEvent event) {
         if (event.event == UsbEvent.ACTION_USB_DETACHED) {
           if (_isConnected) {
-            _handleAutoDisconnect();
+            disconnect();
+          }
+        } else if (event.event == UsbEvent.ACTION_USB_ATTACHED) {
+          // Auto-connect when device is plugged in
+          if (!_isConnected && !_isConnecting) {
+            Future.delayed(const Duration(milliseconds: 500), () {
+              connect(showConnecting: false);
+            });
           }
         }
       });
@@ -132,375 +156,40 @@ class _ColorPatternScreenState extends State<ColorPatternScreen>
       // USB monitoring not available
     }
   }
-  
-  void _handleAutoDisconnect() {
-    setState(() {
-      _isConnected = false;
-      _port = null;
-      _device = null;
-    });
-    _showSnackBar('RP2040 disconnected', Icons.usb_off);
-  }
 
-  @override
-  void dispose() {
-    _pulseController.dispose();
-    _usbSubscription?.cancel();
-    _dataSubscription?.cancel();
-    _port?.close();
-    super.dispose();
-  }
-
-  Future<void> _loadSavedPatterns() async {
-    final prefs = await SharedPreferences.getInstance();
-    final patternsJson = prefs.getStringList('saved_patterns') ?? [];
-    
-    setState(() {
-      _savedPatterns = patternsJson
-          .map((json) => SavedPattern.fromJson(jsonDecode(json)))
-          .toList();
-    });
-  }
-
-  Future<void> _savePatternsToStorage() async {
-    final prefs = await SharedPreferences.getInstance();
-    final patternsJson = _savedPatterns
-        .map((pattern) => jsonEncode(pattern.toJson()))
-        .toList();
-    await prefs.setStringList('saved_patterns', patternsJson);
-  }
-
-  Future<void> _saveCurrentPattern() async {
-    if (colorPattern.isEmpty) {
-      _showSnackBar('No colors to save', Icons.warning_amber);
-      return;
+  Future<String> connect({bool showConnecting = true}) async {
+    if (kIsWeb || !Platform.isAndroid) {
+      return 'USB Serial only works on Android devices';
     }
 
-    final controller = TextEditingController();
-    final result = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Save Pattern'),
-        content: TextField(
-          controller: controller,
-          decoration: const InputDecoration(
-            labelText: 'Pattern name',
-            hintText: 'e.g., Sunset Colors',
-          ),
-          autofocus: true,
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, controller.text),
-            child: const Text('Save'),
-          ),
-        ],
-      ),
-    );
-
-    if (result != null && result.isNotEmpty) {
-      final pattern = SavedPattern(
-        name: result,
-        colors: List.from(colorPattern),
-        transition: _selectedTransition,
-        savedAt: DateTime.now(),
-      );
-
-      setState(() {
-        _savedPatterns.insert(0, pattern);
-      });
-
-      await _savePatternsToStorage();
-      _showSnackBar('Pattern saved: $result', Icons.check_circle);
-    }
-  }
-
-  Future<void> _loadPattern(SavedPattern pattern) async {
-    setState(() {
-      colorPattern = List.from(pattern.colors);
-      _selectedTransition = pattern.transition;
-    });
-    _showSnackBar('Loaded: ${pattern.name}', Icons.download);
-  }
-
-  Future<void> _deletePattern(int index) async {
-    final pattern = _savedPatterns[index];
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Delete Pattern?'),
-        content: Text('Are you sure you want to delete "${pattern.name}"?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: FilledButton.styleFrom(
-              backgroundColor: Colors.red,
-            ),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
-    );
-
-    if (confirm == true) {
-      setState(() {
-        _savedPatterns.removeAt(index);
-      });
-      await _savePatternsToStorage();
-      _showSnackBar('Pattern deleted', Icons.delete);
-    }
-  }
-
-  Future<void> _exportPattern(SavedPattern pattern) async {
-    final patternData = {
-      'pattern': pattern.colors
-          .map((color) => {
-                'r': color.red,
-                'g': color.green,
-                'b': color.blue,
-              })
-          .toList(),
-      'count': pattern.colors.length,
-      'transition': pattern.transition,
-      'name': pattern.name,
-      'exported_at': DateTime.now().toIso8601String(),
-    };
-
-    final jsonString = JsonEncoder.withIndent('  ').convert(patternData);
+    _isConnecting = true;
+    _showConnecting = showConnecting;
+    notifyListeners();
 
     try {
-      if (kIsWeb) {
-        _showSnackBar('Export not available on web', Icons.error);
-        return;
-      }
+      await Future.delayed(const Duration(milliseconds: 500));
 
-      // Get temporary directory
-      final directory = await getTemporaryDirectory();
-      final fileName = '${pattern.name.replaceAll(RegExp(r'[^a-zA-Z0-9_]'), '_')}_pattern.json';
-      final file = File('${directory.path}/$fileName');
-      
-      // Write file
-      await file.writeAsString(jsonString);
-      
-      // Share the file
-      await Share.shareXFiles(
-        [XFile(file.path)],
-        subject: 'Color Pattern: ${pattern.name}',
-      );
-
-      _showSnackBar('Pattern exported', Icons.share);
-    } catch (e) {
-      _showSnackBar('Export failed: $e', Icons.error);
-    }
-  }
-
-  Future<void> _showPatternLibrary() async {
-    await showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (context) => DraggableScrollableSheet(
-        initialChildSize: 0.7,
-        maxChildSize: 0.95,
-        minChildSize: 0.5,
-        builder: (context, scrollController) => Container(
-          decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.surface,
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
-          ),
-          child: Column(
-            children: [
-              const SizedBox(height: 16),
-              Container(
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant.withOpacity(0.4),
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.all(24),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        'Pattern Library',
-                        style: Theme.of(context).textTheme.headlineSmall,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Expanded(
-                child: _savedPatterns.isEmpty
-                    ? Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(
-                              Icons.folder_open,
-                              size: 64,
-                              color: Theme.of(context).colorScheme.onSurfaceVariant,
-                            ),
-                            const SizedBox(height: 16),
-                            Text(
-                              'No saved patterns',
-                              style: Theme.of(context).textTheme.titleMedium,
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              'Create and save patterns to see them here',
-                              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                                color: Theme.of(context).colorScheme.onSurfaceVariant,
-                              ),
-                            ),
-                          ],
-                        ),
-                      )
-                    : ListView.builder(
-                        controller: scrollController,
-                        padding: const EdgeInsets.symmetric(horizontal: 16),
-                        itemCount: _savedPatterns.length,
-                        itemBuilder: (context, index) {
-                          final pattern = _savedPatterns[index];
-                          return Card(
-                            margin: const EdgeInsets.only(bottom: 12),
-                            child: ListTile(
-                              contentPadding: const EdgeInsets.all(12),
-                              leading: Container(
-                                width: 50,
-                                height: 50,
-                                decoration: BoxDecoration(
-                                  borderRadius: BorderRadius.circular(8),
-                                  gradient: LinearGradient(
-                                    colors: pattern.colors.isEmpty
-                                        ? [Colors.grey, Colors.grey]
-                                        : pattern.colors,
-                                  ),
-                                ),
-                              ),
-                              title: Text(
-                                pattern.name,
-                                style: const TextStyle(fontWeight: FontWeight.w600),
-                              ),
-                              subtitle: Text(
-                                '${pattern.colors.length} colors · ${pattern.transition}',
-                                style: TextStyle(
-                                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                                  fontSize: 12,
-                                ),
-                              ),
-                              trailing: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  IconButton(
-                                    icon: const Icon(Icons.share, size: 20),
-                                    onPressed: () {
-                                      Navigator.pop(context);
-                                      _exportPattern(pattern);
-                                    },
-                                    tooltip: 'Export',
-                                  ),
-                                  IconButton(
-                                    icon: const Icon(Icons.delete, size: 20),
-                                    onPressed: () {
-                                      Navigator.pop(context);
-                                      _deletePattern(index);
-                                    },
-                                    tooltip: 'Delete',
-                                  ),
-                                ],
-                              ),
-                              onTap: () {
-                                Navigator.pop(context);
-                                _loadPattern(pattern);
-                              },
-                            ),
-                          );
-                        },
-                      ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Future<void> _checkUSBDevices() async {
-    // USB Serial only works on Android
-    if (kIsWeb || (!Platform.isAndroid)) {
-      setState(() {
-        _device = null;
-      });
-      return;
-    }
-
-    try {
       List<UsbDevice> devices = await UsbSerial.listDevices();
-      if (devices.isNotEmpty) {
-        setState(() {
-          _device = devices.first;
-        });
-      }
-    } catch (e) {
-      setState(() {
-        _device = null;
-      });
-    }
-  }
 
-  Future<void> _connectToDevice() async {
-    if (kIsWeb || (!Platform.isAndroid)) {
-      _showSnackBar('USB Serial only works on Android devices', Icons.phone_android);
-      return;
-    }
-
-    setState(() {
-      _isConnecting = true;
-    });
-
-    try {
-      // Give the system time to enumerate devices
-      await Future.delayed(const Duration(milliseconds: 300));
-      
-      List<UsbDevice> devices = await UsbSerial.listDevices();
-      
       if (devices.isEmpty) {
-        setState(() {
-          _isConnecting = false;
-        });
-        _showSnackBar('No USB device found. Check OTG cable and RP2040.', Icons.error_outline);
-        return;
+        _isConnecting = false;
+        _showConnecting = false;
+        notifyListeners();
+        return 'No USB device found';
       }
 
-      // Try all available devices (in case multiple are connected)
       for (var device in devices) {
         try {
           _device = device;
-          
-          // Create port - this will trigger permission dialog if needed
           _port = await _device!.create();
-          
+
           if (_port == null) continue;
-          
-          // Try to open the port
+
           bool opened = await _port!.open();
 
           if (opened) {
-            // Give device time to stabilize after opening
             await Future.delayed(const Duration(milliseconds: 300));
-            
-            // Configure serial parameters
+
             try {
               await _port!.setPortParameters(
                 115200,
@@ -509,273 +198,903 @@ class _ColorPatternScreenState extends State<ColorPatternScreen>
                 UsbPort.PARITY_NONE,
               );
             } catch (e) {
-              // Some devices don't support parameter setting, that's ok
+              // Some devices don't support parameter setting
             }
 
-            setState(() {
-              _isConnected = true;
-              _isConnecting = false;
-            });
-
-            // Start listening for incoming data
+            _isConnected = true;
+            _isConnecting = false;
+            _showConnecting = false;
             _startDataListener();
+            notifyListeners();
 
-            _showSnackBar('Connected to RP2040', Icons.check_circle);
-            return; // Success!
+            return 'Connected to RP2040';
           }
         } catch (e) {
-          // Try next device
           continue;
         }
       }
-      
-      // If we get here, none of the devices worked
-      setState(() {
-        _isConnecting = false;
-      });
-      _showSnackBar('Could not connect to any USB device', Icons.error_outline);
-      
-    } catch (e) {
-      setState(() {
-        _isConnecting = false;
-      });
-      _showSnackBar('Connection error: Check USB permissions', Icons.error_outline);
-    }
-  }
 
-  Future<void> _disconnectDevice() async {
-    _dataSubscription?.cancel();
-    _dataSubscription = null;
-    await _port?.close();
-    setState(() {
-      _isConnected = false;
-      _port = null;
-      _incomingData = '';
-    });
-    _showSnackBar('Disconnected', Icons.info_outline);
+      _isConnecting = false;
+      _showConnecting = false;
+      notifyListeners();
+      return 'Could not connect';
+    } catch (e) {
+      _isConnecting = false;
+      _showConnecting = false;
+      notifyListeners();
+      return 'Connection error';
+    }
   }
 
   void _startDataListener() {
     if (_port == null) return;
 
     _dataSubscription = _port!.inputStream?.listen((Uint8List data) {
-      // Convert bytes to string
       String received = utf8.decode(data);
       _incomingData += received;
 
-      // Check if we have a complete line (ends with newline)
       if (_incomingData.contains('\n')) {
         List<String> lines = _incomingData.split('\n');
-
-        // Process all complete lines (all but the last one)
         for (int i = 0; i < lines.length - 1; i++) {
-          _processIncomingLine(lines[i].trim());
-        }
+          String line = lines[i].trim();
+          if (line.isNotEmpty && line.startsWith('{')) {
+            // Try to parse as JSON response
+            try {
+              final json = jsonDecode(line);
 
-        // Keep the incomplete part for next time
+              // Check for pattern response
+              if (json['pattern'] != null && json['count'] != null) {
+                // This is a pattern response
+                List<Color> colors = [];
+                for (var colorData in json['pattern']) {
+                  colors.add(Color.fromARGB(
+                    255,
+                    colorData['r'] as int,
+                    colorData['g'] as int,
+                    colorData['b'] as int,
+                  ));
+                }
+                _currentChipPattern = SavedPattern(
+                  name: 'Current Pattern',
+                  colors: colors,
+                  transition: json['transition'] ?? 'instant',
+                  savedAt: DateTime.now(),
+                );
+                _saveChipPattern();
+                notifyListeners();
+              }
+            } catch (e) {
+              // Not a valid JSON, ignore
+            }
+          }
+        }
         _incomingData = lines.last;
       }
     });
   }
 
-  void _processIncomingLine(String line) {
-    if (line.isEmpty) return;
-
-    // Try to parse as JSON (pattern data)
-    if (line.startsWith('{')) {
-      try {
-        Map<String, dynamic> patternData = jsonDecode(line);
-
-        if (patternData.containsKey('pattern') &&
-            patternData.containsKey('count') &&
-            patternData.containsKey('transition')) {
-          _handleReceivedPattern(patternData);
-        }
-      } catch (e) {
-        // Not valid JSON pattern data, ignore
-      }
-    }
+  Future<void> disconnect() async {
+    _dataSubscription?.cancel();
+    _dataSubscription = null;
+    await _port?.close();
+    _isConnected = false;
+    _port = null;
+    _device = null;
+    _incomingData = '';
+    notifyListeners();
   }
 
-  void _handleReceivedPattern(Map<String, dynamic> patternData) {
-    try {
-      List<dynamic> pattern = patternData['pattern'];
-      String transition = patternData['transition'];
-
-      List<Color> colors = pattern.map((colorData) {
-        int r = colorData['r'];
-        int g = colorData['g'];
-        int b = colorData['b'];
-        return Color.fromARGB(255, r, g, b);
-      }).toList();
-
-      setState(() {
-        colorPattern = colors;
-        _selectedTransition = transition;
-        _isReading = false;
-      });
-
-      _showSnackBar('Pattern loaded from device (${colors.length} colors)', Icons.download);
-    } catch (e) {
-      setState(() {
-        _isReading = false;
-      });
-      _showSnackBar('Failed to parse pattern from device', Icons.error);
-    }
-  }
-
-  Future<void> _readPatternFromDevice() async {
+  Future<void> sendPattern(Map<String, dynamic> patternData) async {
     if (!_isConnected || _port == null) {
-      _showSnackBar('Not connected to device', Icons.warning_amber);
-      return;
+      throw Exception('Not connected to device');
     }
-
-    setState(() {
-      _isReading = true;
-    });
-
-    try {
-      // Send GET_PATTERN command
-      await _port!.write(Uint8List.fromList(utf8.encode('GET_PATTERN\n')));
-
-      // Wait for response (timeout after 3 seconds)
-      await Future.delayed(const Duration(milliseconds: 3000));
-
-      if (_isReading) {
-        setState(() {
-          _isReading = false;
-        });
-        _showSnackBar('No response from device', Icons.warning_amber);
-      }
-    } catch (e) {
-      setState(() {
-        _isReading = false;
-      });
-      _showSnackBar('Failed to read pattern', Icons.error_outline);
-    }
-  }
-
-  Future<void> _sendPattern() async {
-    if (!_isConnected || _port == null) {
-      _showSnackBar('Not connected to device', Icons.warning_amber);
-      return;
-    }
-
-    Map<String, dynamic> patternData = {
-      'pattern': colorPattern
-          .map((color) => {
-                'r': color.red,
-                'g': color.green,
-                'b': color.blue,
-              })
-          .toList(),
-      'count': colorPattern.length,
-      'transition': _selectedTransition,
-    };
 
     String jsonString = jsonEncode(patternData);
+    await _port!.write(Uint8List.fromList(utf8.encode('$jsonString\n')));
+  }
 
-    try {
-      await _port!.write(Uint8List.fromList(utf8.encode('$jsonString\n')));
-      _showSnackBar('Pattern sent with $_selectedTransition transition!', Icons.send);
-    } catch (e) {
-      _showSnackBar('Failed to send pattern', Icons.error_outline);
+  @override
+  void dispose() {
+    _usbSubscription?.cancel();
+    _dataSubscription?.cancel();
+    _port?.close();
+    super.dispose();
+  }
+}
+
+class MainNavigationScreen extends StatefulWidget {
+  const MainNavigationScreen({super.key});
+
+  @override
+  State<MainNavigationScreen> createState() => _MainNavigationScreenState();
+}
+
+class _MainNavigationScreenState extends State<MainNavigationScreen> with TickerProviderStateMixin {
+  int _currentIndex = 0;
+  final DeviceState _deviceState = DeviceState();
+  late PageController _pageController;
+  late AnimationController _glowController;
+  final GlobalKey<_LibraryScreenState> _libraryKey = GlobalKey<_LibraryScreenState>();
+
+  @override
+  void initState() {
+    super.initState();
+    _pageController = PageController();
+    _deviceState.startUsbMonitoring();
+    _deviceState.loadChipPattern(); // Load saved chip pattern
+
+    // Glow animation controller
+    _glowController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 4),
+    )..repeat();
+
+    // Auto-connect with retry
+    _autoConnect();
+  }
+
+  Future<void> _autoConnect() async {
+    if (kIsWeb || !Platform.isAndroid) return;
+
+    await Future.delayed(const Duration(milliseconds: 1000));
+
+    // Try up to 3 times (silently, without showing connecting indicator)
+    for (int i = 0; i < 3; i++) {
+      final result = await _deviceState.connect(showConnecting: false);
+      if (result.contains('Connected')) {
+        break;
+      }
+      await Future.delayed(const Duration(milliseconds: 1000));
     }
   }
 
-  void _addColor(Color color) {
-    setState(() {
-      colorPattern.add(color);
-    });
+  @override
+  void dispose() {
+    _pageController.dispose();
+    _glowController.dispose();
+    _deviceState.dispose();
+    super.dispose();
   }
 
-  void _showColorPicker() {
-    Color pickerColor = colorPattern.isEmpty ? Colors.deepPurple : colorPattern.last;
+  @override
+  Widget build(BuildContext context) {
+    final screens = [
+      PatternCreatorScreen(deviceState: _deviceState),
+      LibraryScreen(key: _libraryKey, deviceState: _deviceState),
+    ];
 
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (context) => Container(
-        height: MediaQuery.of(context).size.height * 0.75,
-        decoration: BoxDecoration(
-          color: Theme.of(context).colorScheme.surface,
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
-        ),
-        child: Column(
-          children: [
-            const SizedBox(height: 16),
-            Container(
-              width: 40,
-              height: 4,
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.onSurfaceVariant.withOpacity(0.4),
-                borderRadius: BorderRadius.circular(2),
-              ),
+    return Scaffold(
+      body: PageView(
+        controller: _pageController,
+        physics: const NeverScrollableScrollPhysics(),
+        onPageChanged: (index) {
+          setState(() => _currentIndex = index);
+          // Reload patterns when navigating to library tab
+          if (index == 1) {
+            _libraryKey.currentState?._loadPatterns();
+          }
+        },
+        children: screens,
+      ),
+      bottomNavigationBar: AnimatedBuilder(
+        animation: _glowController,
+        builder: (context, child) {
+          return Container(
+            decoration: BoxDecoration(
+              color: const Color(0xFF1A1A1A),
+              boxShadow: [
+                BoxShadow(
+                  color: _getGlowColor().withOpacity(0.3),
+                  blurRadius: 20,
+                  offset: const Offset(0, -5),
+                ),
+              ],
             ),
-            Padding(
-              padding: const EdgeInsets.all(24),
-              child: Text(
-                'Pick a Color',
-                style: Theme.of(context).textTheme.headlineSmall,
-              ),
-            ),
-            Expanded(
-              child: SingleChildScrollView(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: ColorPicker(
-                    pickerColor: pickerColor,
-                    onColorChanged: (color) {
-                      pickerColor = color;
-                    },
-                    pickerAreaHeightPercent: 0.8,
-                    displayThumbColor: true,
-                    enableAlpha: false,
-                    labelTypes: const [],
-                  ),
+            child: SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceAround,
+                  children: [
+                    _buildNavItem(0, Icons.palette_outlined, Icons.palette, 'Create'),
+                    _buildNavItem(1, Icons.folder_outlined, Icons.folder, 'Library'),
+                  ],
                 ),
               ),
             ),
-            Padding(
-              padding: const EdgeInsets.all(24),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: () => Navigator.of(context).pop(),
-                      style: OutlinedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
+          );
+        },
+      ),
+    );
+  }
+
+  Color _getGlowColor() {
+    final glowColours = _deviceState.currentPatternColours;
+    if (glowColours.isEmpty) return Colors.grey;
+
+    final t = _glowController.value;
+    final index = (t * glowColours.length).floor() % glowColours.length;
+    final nextIndex = (index + 1) % glowColours.length;
+    final localT = (t * glowColours.length) - index;
+
+    return Color.lerp(glowColours[index], glowColours[nextIndex], localT)!;
+  }
+
+  Widget _buildNavItem(int index, IconData outlineIcon, IconData filledIcon, String label) {
+    final isSelected = _currentIndex == index;
+    return Expanded(
+      child: GestureDetector(
+        onTap: () {
+          setState(() => _currentIndex = index);
+          _pageController.animateToPage(
+            index,
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeInOut,
+          );
+        },
+        behavior: HitTestBehavior.opaque,
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                isSelected ? filledIcon : outlineIcon,
+                color: isSelected
+                    ? const Color(0xFFFF8C00)
+                    : Colors.grey.shade600,
+                size: 26,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                label,
+                style: TextStyle(
+                  color: isSelected
+                      ? const Color(0xFFFF8C00)
+                      : Colors.grey.shade600,
+                  fontSize: 12,
+                  fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// Pattern Creator Screen
+class PatternCreatorScreen extends StatefulWidget {
+  final DeviceState deviceState;
+
+  const PatternCreatorScreen({super.key, required this.deviceState});
+
+  @override
+  State<PatternCreatorScreen> createState() => _PatternCreatorScreenState();
+}
+
+class _PatternCreatorScreenState extends State<PatternCreatorScreen> with TickerProviderStateMixin {
+  List<Color> colourPattern = [];
+  String _selectedTransition = 'instant';
+  late AnimationController _glowController;
+  bool _isColourPickerVisible = false;
+  Color _pickerColour = Colors.deepPurple;
+  int _logoTapCount = 0;
+  DateTime? _lastLogoTap;
+
+  final List<Map<String, String>> _transitions = [
+    {'id': 'instant', 'name': 'Instant'},
+    {'id': 'fade', 'name': 'Fade'},
+    {'id': 'pulse', 'name': 'Pulse'},
+    {'id': 'strobe', 'name': 'Strobe'},
+    {'id': 'bounce', 'name': 'Bounce'},
+    {'id': 'breathe', 'name': 'Breathe'},
+    {'id': 'blink', 'name': 'Blink'},
+    {'id': 'heartbeat', 'name': 'Heartbeat'},
+    {'id': 'smooth', 'name': 'Smooth'},
+    {'id': 'sparkle', 'name': 'Sparkle'},
+    {'id': 'color_wheel', 'name': 'Rainbow'},
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _glowController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 4),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _glowController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0F0F0F),
+      body: SafeArea(
+        child: Stack(
+          children: [
+            Column(
+              children: [
+                _buildHeader(),
+                ListenableBuilder(
+                  listenable: widget.deviceState,
+                  builder: (context, _) {
+                    if (widget.deviceState.patternToCopy != null) {
+                      return _buildCopyPatternBanner();
+                    }
+                    return const SizedBox.shrink();
+                  },
+                ),
+                Expanded(
+                  child: colourPattern.isEmpty ? _buildEmptyState() : _buildColourGrid(),
+                ),
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 300),
+                  curve: Curves.easeInOut,
+                  transform: Matrix4.translationValues(
+                    0,
+                    _isColourPickerVisible ? -MediaQuery.of(context).size.height * 0.5 : 0,
+                    0,
+                  ),
+                  child: Column(
+                    children: [
+                      _buildTransitionSelector(),
+                      _buildActionButtons(),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            _buildColourPickerOverlay(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHeader() {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeInOut,
+      height: _isColourPickerVisible ? 0 : null,
+      child: AnimatedOpacity(
+        duration: const Duration(milliseconds: 200),
+        opacity: _isColourPickerVisible ? 0.0 : 1.0,
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Row(
+            children: [
+              Expanded(
+                child: GestureDetector(
+                  onTap: _handleLogoTap,
+                  child: Image.asset(
+                    'assets/hujlogo.png',
+                    height: 80,
+                    fit: BoxFit.contain,
+                    alignment: Alignment.centerLeft,
+                  ),
+                ),
+              ),
+              _buildConnectionIndicator(),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCopyPatternBanner() {
+    final pattern = widget.deviceState.patternToCopy!;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(24, 0, 24, 16),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A1A1A),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: const Color(0xFFFF8C00),
+          width: 2,
+        ),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.content_copy, color: Color(0xFFFF8C00)),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              'Load "${pattern.name}"?',
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          TextButton(
+            onPressed: () {
+              setState(() {
+                colourPattern = List.from(pattern.colors);
+                _selectedTransition = pattern.transition;
+              });
+              widget.deviceState.setPatternToCopy(null);
+              _showSnackBar('Pattern loaded!', Icons.check_circle);
+            },
+            child: const Text('Load', style: TextStyle(color: Color(0xFFFF8C00))),
+          ),
+          TextButton(
+            onPressed: () => widget.deviceState.setPatternToCopy(null),
+            child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _handleLogoTap() {
+    final now = DateTime.now();
+    if (_lastLogoTap != null && now.difference(_lastLogoTap!).inSeconds > 2) {
+      _logoTapCount = 0;
+    }
+    _lastLogoTap = now;
+    _logoTapCount++;
+
+    if (_logoTapCount >= 5) {
+      _logoTapCount = 0;
+      _showSnackBar('Easter egg found! 🎉', Icons.celebration);
+    }
+  }
+
+  Widget _buildConnectionIndicator() {
+    return ListenableBuilder(
+      listenable: widget.deviceState,
+      builder: (context, _) {
+        final isConnected = widget.deviceState.isConnected;
+        final isConnecting = widget.deviceState.isConnecting;
+
+        if (isConnecting) {
+          return Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.orange.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: Colors.orange, width: 2),
+            ),
+            child: const Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.orange,
+                  ),
+                ),
+                SizedBox(width: 8),
+                Text(
+                  'Connecting...',
+                  style: TextStyle(
+                    color: Colors.orange,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          );
+        }
+
+        return GestureDetector(
+          onTap: () async {
+            if (isConnected) {
+              await widget.deviceState.disconnect();
+              _showSnackBar('Disconnected', Icons.power_off);
+            } else {
+              final result = await widget.deviceState.connect();
+              _showSnackBar(result, isConnected ? Icons.check_circle : Icons.error);
+            }
+          },
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            decoration: BoxDecoration(
+              color: isConnected
+                  ? const Color(0xFF00CC00).withOpacity(0.1)
+                  : Colors.red.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                color: isConnected ? const Color(0xFF00CC00) : Colors.red,
+                width: 2,
+              ),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  isConnected ? Icons.usb : Icons.usb_off,
+                  color: isConnected ? const Color(0xFF00CC00) : Colors.red,
+                  size: 20,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  isConnected ? 'Connected' : 'Disconnected',
+                  style: TextStyle(
+                    color: isConnected ? const Color(0xFF00CC00) : Colors.red,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildEmptyState() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.palette, size: 100, color: Colors.grey.shade700),
+          const SizedBox(height: 24),
+          Text(
+            'No colours added',
+            style: TextStyle(
+              color: Colors.grey.shade400,
+              fontSize: 20,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Tap the + button to add colours',
+            style: TextStyle(
+              color: Colors.grey.shade600,
+              fontSize: 14,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildColourGrid() {
+    return GridView.builder(
+      padding: const EdgeInsets.all(24),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 4,
+        crossAxisSpacing: 16,
+        mainAxisSpacing: 16,
+      ),
+      itemCount: colourPattern.length,
+      itemBuilder: (context, index) {
+        return GestureDetector(
+          onTap: () {
+            setState(() {
+              colourPattern.removeAt(index);
+              widget.deviceState.updatePatternColours(colourPattern);
+            });
+            _showSnackBar('Colour removed', Icons.delete);
+          },
+          onLongPress: () {
+            _showColourPicker(index);
+          },
+          child: AnimatedBuilder(
+            animation: _glowController,
+            builder: (context, child) {
+              return Container(
+                decoration: BoxDecoration(
+                  color: colourPattern[index],
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(
+                    color: Colors.white.withOpacity(0.2),
+                    width: 2,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: colourPattern[index].withOpacity(0.5),
+                      blurRadius: 12,
+                      spreadRadius: 2,
+                    ),
+                  ],
+                ),
+                child: Stack(
+                  children: [
+                    Positioned(
+                      right: 4,
+                      top: 4,
+                      child: Icon(
+                        Icons.close,
+                        color: Colors.white.withOpacity(0.7),
+                        size: 16,
                       ),
-                      child: const Text('Cancel'),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildTransitionSelector() {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(24, 8, 24, 16),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A1A1A),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Transition Effect',
+            style: TextStyle(
+              color: Colors.grey.shade400,
+              fontWeight: FontWeight.w600,
+              fontSize: 14,
+            ),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: _transitions.map((transition) {
+              final isSelected = _selectedTransition == transition['id'];
+              return GestureDetector(
+                onTap: () {
+                  setState(() => _selectedTransition = transition['id']!);
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: isSelected
+                        ? const Color(0xFFFF8C00).withOpacity(0.2)
+                        : Colors.transparent,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: isSelected
+                          ? const Color(0xFFFF8C00)
+                          : Colors.grey.shade700,
+                      width: 2,
                     ),
                   ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: FilledButton(
-                      onPressed: () {
-                        _addColor(pickerColor);
-                        Navigator.of(context).pop();
-                      },
-                      style: FilledButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                      ),
-                      child: const Text('Add Color'),
+                  child: Text(
+                    transition['name']!,
+                    style: TextStyle(
+                      color: isSelected
+                          ? const Color(0xFFFF8C00)
+                          : Colors.grey.shade400,
+                      fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
                     ),
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildActionButtons() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
+      child: Row(
+        children: [
+          Expanded(
+            child: ElevatedButton(
+              onPressed: colourPattern.isEmpty
+                  ? null
+                  : () {
+                      setState(() {
+                        colourPattern.clear();
+                        widget.deviceState.updatePatternColours(colourPattern);
+                      });
+                      _showSnackBar('Pattern cleared', Icons.delete_sweep);
+                    },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF1A1A1A),
+                foregroundColor: Colors.grey,
+                disabledBackgroundColor: const Color(0xFF1A1A1A).withOpacity(0.5),
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                  side: BorderSide(
+                    color: colourPattern.isEmpty
+                        ? Colors.grey.shade800
+                        : Colors.grey.shade700,
+                    width: 2,
+                  ),
+                ),
+              ),
+              child: const Icon(Icons.delete_sweep),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: ElevatedButton(
+              onPressed: () {
+                setState(() {
+                  _isColourPickerVisible = true;
+                });
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF1A1A1A),
+                foregroundColor: const Color(0xFFFF8C00),
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                  side: const BorderSide(
+                    color: Color(0xFFFF8C00),
+                    width: 2,
+                  ),
+                ),
+              ),
+              child: const Icon(Icons.add),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            flex: 2,
+            child: ElevatedButton(
+              onPressed: colourPattern.isEmpty
+                  ? null
+                  : () async {
+                      await _sendPattern();
+                    },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFFF8C00),
+                foregroundColor: Colors.white,
+                disabledBackgroundColor: const Color(0xFFFF8C00).withOpacity(0.3),
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
+              ),
+              child: const Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.send),
+                  SizedBox(width: 8),
+                  Text('Send', style: TextStyle(fontWeight: FontWeight.bold)),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildColourPickerOverlay() {
+    return AnimatedPositioned(
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeInOut,
+      bottom: _isColourPickerVisible ? 0 : -MediaQuery.of(context).size.height,
+      left: 0,
+      right: 0,
+      height: MediaQuery.of(context).size.height * 0.6,
+      child: Container(
+        decoration: const BoxDecoration(
+          color: Color(0xFF1A1A1A),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text(
+                    'Pick a Colour',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: () {
+                      setState(() {
+                        _isColourPickerVisible = false;
+                      });
+                    },
+                    icon: const Icon(Icons.close, color: Colors.white),
                   ),
                 ],
+              ),
+            ),
+            Expanded(
+              child: ColorPicker(
+                pickerColor: _pickerColour,
+                onColorChanged: (color) {
+                  setState(() {
+                    _pickerColour = color;
+                  });
+                },
+                pickerAreaHeightPercent: 0.8,
+                displayThumbColor: true,
+                enableAlpha: false,
+                labelTypes: const [],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(24),
+              child: ElevatedButton(
+                onPressed: () {
+                  setState(() {
+                    colourPattern.add(_pickerColour);
+                    widget.deviceState.updatePatternColours(colourPattern);
+                    _isColourPickerVisible = false;
+                  });
+                  _showSnackBar('Colour added', Icons.check_circle);
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFFFF8C00),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  minimumSize: const Size(double.infinity, 50),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                ),
+                child: const Text(
+                  'Add Colour',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
               ),
             ),
           ],
         ),
       ),
     );
+  }
+
+  void _showColourPicker(int index) {
+    setState(() {
+      _pickerColour = colourPattern[index];
+      _isColourPickerVisible = true;
+    });
+  }
+
+  Future<void> _sendPattern() async {
+    if (!widget.deviceState.isConnected) {
+      _showSnackBar('Not connected to device', Icons.warning_amber);
+      return;
+    }
+
+    if (colourPattern.isEmpty) {
+      _showSnackBar('Add colours first', Icons.info);
+      return;
+    }
+
+    try {
+      final patternData = {
+        'pattern': colourPattern
+            .map((c) => {
+                  'r': c.red,
+                  'g': c.green,
+                  'b': c.blue,
+                })
+            .toList(),
+        'count': colourPattern.length,
+        'transition': _selectedTransition,
+      };
+
+      await widget.deviceState.sendPattern(patternData);
+      _showSnackBar('Pattern sent successfully!', Icons.check_circle);
+    } catch (e) {
+      _showSnackBar('Failed to send pattern', Icons.error);
+    }
   }
 
   void _showSnackBar(String message, IconData icon) {
@@ -785,80 +1104,416 @@ class _ColorPatternScreenState extends State<ColorPatternScreen>
           children: [
             Icon(icon, color: Colors.white),
             const SizedBox(width: 12),
-            Expanded(child: Text(message)),
+            Expanded(child: Text(message, style: const TextStyle(color: Colors.white))),
           ],
         ),
         behavior: SnackBarBehavior.floating,
+        backgroundColor: const Color(0xFF1A1A1A),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        margin: const EdgeInsets.all(16),
+        margin: const EdgeInsets.fromLTRB(16, 16, 16, 100),
+        duration: const Duration(seconds: 2),
       ),
     );
   }
 
-  Future<void> _showDeviceInfo() async {
-    if (kIsWeb || !Platform.isAndroid) {
-      _showSnackBar('USB only works on Android', Icons.info);
+  Future<void> _savePattern() async {
+    final TextEditingController nameController = TextEditingController();
+
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1A1A),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text('Save Pattern', style: TextStyle(color: Colors.white)),
+        content: TextField(
+          controller: nameController,
+          autofocus: true,
+          style: const TextStyle(color: Colors.white),
+          decoration: InputDecoration(
+            hintText: 'Pattern name',
+            hintStyle: TextStyle(color: Colors.grey.shade600),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: BorderSide(color: Colors.grey.shade700),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: Color(0xFFFF8C00)),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFFF8C00),
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+
+    if (result == true && nameController.text.isNotEmpty) {
+      final pattern = SavedPattern(
+        name: nameController.text,
+        colors: List.from(colourPattern),
+        transition: _selectedTransition,
+        savedAt: DateTime.now(),
+      );
+
+      final prefs = await SharedPreferences.getInstance();
+      final patterns = prefs.getStringList('saved_patterns') ?? [];
+      patterns.add(jsonEncode(pattern.toJson()));
+      await prefs.setStringList('saved_patterns', patterns);
+
+      _showSnackBar('Pattern saved!', Icons.save);
+    }
+  }
+}
+
+// Library Screen
+class LibraryScreen extends StatefulWidget {
+  final DeviceState deviceState;
+
+  const LibraryScreen({super.key, required this.deviceState});
+
+  @override
+  State<LibraryScreen> createState() => _LibraryScreenState();
+}
+
+class _LibraryScreenState extends State<LibraryScreen> with TickerProviderStateMixin {
+  bool _isDownloading = false;
+  List<SavedPattern> _savedPatterns = [];
+  late AnimationController _glowController;
+
+  @override
+  void initState() {
+    super.initState();
+    _glowController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 3),
+    )..repeat();
+    _loadPatterns();
+  }
+
+  @override
+  void dispose() {
+    _glowController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadPatterns() async {
+    final prefs = await SharedPreferences.getInstance();
+    final patternsJson = prefs.getStringList('saved_patterns') ?? [];
+
+    setState(() {
+      _savedPatterns = patternsJson
+          .map((json) => SavedPattern.fromJson(jsonDecode(json)))
+          .toList();
+    });
+  }
+
+  Future<void> _downloadFromChip() async {
+    if (!widget.deviceState.isConnected) {
+      _showSnackBar('Not connected to device', Icons.warning_amber);
       return;
     }
 
+    setState(() {
+      _isDownloading = true;
+    });
+
     try {
-      List<UsbDevice> devices = await UsbSerial.listDevices();
-      
-      if (!mounted) return;
-      
-      showDialog(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('USB Devices'),
-          content: devices.isEmpty
-              ? const Text('No USB devices detected.\n\nMake sure:\n• RP2040 is connected via OTG cable\n• Cable supports data (not charge-only)\n• External power is connected')
-              : SingleChildScrollView(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
+      // Send GET_PATTERN command
+      await widget.deviceState.port?.write(Uint8List.fromList(utf8.encode('GET_PATTERN\n')));
+
+      // Wait for response
+      await Future.delayed(const Duration(milliseconds: 1500));
+
+      setState(() {
+        _isDownloading = false;
+      });
+
+      if (widget.deviceState.currentChipPattern != null) {
+        setState(() {}); // Trigger rebuild to show the chip pattern
+        _showSnackBar('Pattern retrieved from chip', Icons.check_circle);
+      } else {
+        _showSnackBar('No pattern found on chip', Icons.info_outline);
+      }
+    } catch (e) {
+      setState(() {
+        _isDownloading = false;
+      });
+      _showSnackBar('Failed to retrieve pattern', Icons.error_outline);
+    }
+  }
+
+  Widget _buildChipPatternCard(SavedPattern pattern) {
+    return AnimatedBuilder(
+      animation: _glowController,
+      builder: (context, child) {
+        final glowProgress = _glowController.value;
+        final glowOpacity = 0.3 + (0.2 * (glowProgress - 0.5).abs() * 2);
+
+        return GestureDetector(
+          onTap: () => _sendPattern(pattern),
+          child: Container(
+            margin: const EdgeInsets.only(bottom: 16),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(20),
+              boxShadow: [
+                BoxShadow(
+                  color: const Color(0xFFFF8C00).withOpacity(glowOpacity),
+                  blurRadius: 20,
+                  spreadRadius: 2,
+                ),
+              ],
+            ),
+            child: Container(
+            decoration: BoxDecoration(
+              color: const Color(0xFF1A1A1A),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                color: const Color(0xFFFF8C00),
+                width: 2,
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Row(
                     children: [
-                      Text('Found ${devices.length} device(s):'),
-                      const SizedBox(height: 16),
-                      ...devices.map((device) => Padding(
-                        padding: const EdgeInsets.only(bottom: 12),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text('Vendor ID: ${device.vid}'),
-                            Text('Product ID: ${device.pid}'),
-                            Text('Device ID: ${device.deviceId}'),
-                            const Divider(),
-                          ],
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFF8C00).withOpacity(0.2),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: const Color(0xFFFF8C00),
+                            width: 1,
+                          ),
                         ),
-                      )),
+                        child: const Text(
+                          'Current Pattern',
+                          style: TextStyle(
+                            color: Color(0xFFFF8C00),
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                      const Spacer(),
+                      PopupMenuButton(
+                        icon: const Icon(Icons.more_vert, color: Colors.white),
+                        color: const Color(0xFF2A2A2A),
+                        itemBuilder: (context) => [
+                          PopupMenuItem(
+                            onTap: () => _copyPatternToCreate(pattern),
+                            child: const Row(
+                              children: [
+                                Icon(Icons.copy, color: Colors.white, size: 20),
+                                SizedBox(width: 12),
+                                Text('Copy to Create', style: TextStyle(color: Colors.white)),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
                     ],
                   ),
                 ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Close'),
+                Container(
+                  height: 60,
+                  margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                  child: ListView.builder(
+                    scrollDirection: Axis.horizontal,
+                    itemCount: pattern.colors.length,
+                    itemBuilder: (context, index) {
+                      return Container(
+                        width: 50,
+                        height: 50,
+                        margin: const EdgeInsets.only(right: 8),
+                        decoration: BoxDecoration(
+                          color: pattern.colors[index],
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: Colors.white.withOpacity(0.2),
+                            width: 2,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
             ),
-          ],
-        ),
-      );
-    } catch (e) {
-      _showSnackBar('Error checking devices', Icons.error);
-    }
+          ),
+          ),
+        );
+      },
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-
     return Scaffold(
-      backgroundColor: colorScheme.background,
+      backgroundColor: const Color(0xFF0F0F0F),
       body: SafeArea(
         child: Column(
           children: [
-            // Header
             Padding(
-              padding: const EdgeInsets.all(20),
+              padding: const EdgeInsets.all(24),
+              child: Row(
+                children: [
+                  const Text(
+                    'Pattern Library',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const Spacer(),
+                  ListenableBuilder(
+                    listenable: widget.deviceState,
+                    builder: (context, _) {
+                      return ElevatedButton.icon(
+                        onPressed: widget.deviceState.isConnected && !_isDownloading
+                            ? _downloadFromChip
+                            : null,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFFFF8C00),
+                          foregroundColor: Colors.white,
+                          disabledBackgroundColor: const Color(0xFFFF8C00).withOpacity(0.3),
+                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                        icon: _isDownloading
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : const Icon(Icons.download),
+                        label: const Text('Get from Chip'),
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: _isDownloading
+                  ? const Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          CircularProgressIndicator(color: Color(0xFFFF8C00)),
+                          SizedBox(height: 16),
+                          Text(
+                            'Reading pattern from chip...',
+                            style: TextStyle(color: Colors.white70),
+                          ),
+                        ],
+                      ),
+                    )
+                  : RefreshIndicator(
+                      onRefresh: _loadPatterns,
+                      color: const Color(0xFFFF8C00),
+                      backgroundColor: const Color(0xFF1A1A1A),
+                      child: _buildPatternsList(),
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPatternsList() {
+    if (_savedPatterns.isEmpty && widget.deviceState.currentChipPattern == null) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.folder_open, size: 100, color: Colors.grey.shade700),
+            const SizedBox(height: 24),
+            Text(
+              'No saved patterns',
+              style: TextStyle(
+                color: Colors.grey.shade400,
+                fontSize: 20,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Create and save patterns to see them here',
+              style: TextStyle(
+                color: Colors.grey.shade600,
+                fontSize: 14,
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      );
+    }
+
+    return ListView(
+      padding: const EdgeInsets.symmetric(horizontal: 24),
+      children: [
+        if (widget.deviceState.currentChipPattern != null) ...[
+          _buildChipPatternCard(widget.deviceState.currentChipPattern!),
+          if (_savedPatterns.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              child: Text(
+                'Saved Patterns',
+                style: TextStyle(
+                  color: Colors.grey.shade400,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+        ],
+        ..._savedPatterns.map((pattern) => _buildPatternCard(pattern)),
+      ],
+    );
+  }
+
+  Widget _buildPatternCard(SavedPattern pattern) {
+    return GestureDetector(
+      onTap: () => _sendPattern(pattern),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 16),
+        decoration: BoxDecoration(
+          color: const Color(0xFF1A1A1A),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: Colors.grey.shade800,
+            width: 2,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(16),
               child: Row(
                 children: [
                   Expanded(
@@ -866,418 +1521,178 @@ class _ColorPatternScreenState extends State<ColorPatternScreen>
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          'Color Pattern',
-                          style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                                fontWeight: FontWeight.bold,
-                              ),
+                          pattern.name,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
                         ),
                         const SizedBox(height: 4),
                         Text(
-                          '${colorPattern.length} colors',
-                          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                                color: colorScheme.onSurfaceVariant,
-                              ),
+                          '${pattern.colors.length} colours • ${pattern.transition}',
+                          style: TextStyle(
+                            color: Colors.grey.shade400,
+                            fontSize: 12,
+                          ),
                         ),
                       ],
                     ),
                   ),
-                  IconButton(
-                    icon: const Icon(Icons.folder),
-                    onPressed: _showPatternLibrary,
-                    tooltip: 'Pattern Library',
+                  PopupMenuButton(
+                    icon: const Icon(Icons.more_vert, color: Colors.white),
+                    color: const Color(0xFF2A2A2A),
+                    itemBuilder: (context) => [
+                      PopupMenuItem(
+                        onTap: () => _sendPattern(pattern),
+                        child: const Row(
+                          children: [
+                            Icon(Icons.send, color: Colors.white, size: 20),
+                            SizedBox(width: 12),
+                            Text('Send to Device', style: TextStyle(color: Colors.white)),
+                          ],
+                        ),
+                      ),
+                      PopupMenuItem(
+                        onTap: () => _copyPatternToCreate(pattern),
+                        child: const Row(
+                          children: [
+                            Icon(Icons.copy, color: Colors.white, size: 20),
+                            SizedBox(width: 12),
+                            Text('Copy to Create', style: TextStyle(color: Colors.white)),
+                          ],
+                        ),
+                      ),
+                      PopupMenuItem(
+                        onTap: () => _exportPattern(pattern),
+                        child: const Row(
+                          children: [
+                            Icon(Icons.share, color: Colors.white, size: 20),
+                            SizedBox(width: 12),
+                            Text('Export', style: TextStyle(color: Colors.white)),
+                          ],
+                        ),
+                      ),
+                      PopupMenuItem(
+                        onTap: () => _deletePattern(pattern),
+                        child: const Row(
+                          children: [
+                            Icon(Icons.delete, color: Colors.red, size: 20),
+                            SizedBox(width: 12),
+                            Text('Delete', style: TextStyle(color: Colors.red)),
+                          ],
+                        ),
+                      ),
+                    ],
                   ),
-                  IconButton(
-                    icon: const Icon(Icons.info_outline),
-                    onPressed: _showDeviceInfo,
-                    tooltip: 'Device Info',
-                  ),
-                  const SizedBox(width: 8),
-                  _buildConnectionButton(),
                 ],
               ),
             ),
-
-            // Color Grid
-            Expanded(
-              child: colorPattern.isEmpty
-                  ? _buildEmptyState()
-                  : Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: GridView.builder(
-                        physics: const BouncingScrollPhysics(),
-                        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: 3,
-                          mainAxisSpacing: 12,
-                          crossAxisSpacing: 12,
-                        ),
-                        itemCount: colorPattern.length,
-                        itemBuilder: (context, index) {
-                          return _buildColorCard(index);
-                        },
+            Container(
+              height: 60,
+              margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: ListView.builder(
+                scrollDirection: Axis.horizontal,
+                itemCount: pattern.colors.length,
+                itemBuilder: (context, index) {
+                  return Container(
+                    width: 50,
+                    height: 50,
+                    margin: const EdgeInsets.only(right: 8),
+                    decoration: BoxDecoration(
+                      color: pattern.colors[index],
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: Colors.white.withOpacity(0.2),
+                        width: 2,
                       ),
                     ),
+                  );
+                },
+              ),
             ),
-
-            // Bottom Action Bar
-            _buildBottomActionBar(),
           ],
         ),
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _showColorPicker,
-        icon: const Icon(Icons.add),
-        label: const Text('Add Color'),
-        elevation: 2,
-      ),
-      floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
     );
   }
 
-  Widget _buildConnectionButton() {
-    if (_isConnecting) {
-      return Container(
-        padding: const EdgeInsets.all(10),
-        decoration: BoxDecoration(
-          color: Colors.orange.withOpacity(0.2),
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: const SizedBox(
-          width: 18,
-          height: 18,
-          child: CircularProgressIndicator(strokeWidth: 2),
-        ),
-      );
+  Future<void> _sendPattern(SavedPattern pattern) async {
+    if (!widget.deviceState.isConnected) {
+      _showSnackBar('Not connected to device', Icons.warning_amber);
+      return;
     }
 
-    return Material(
-      color: _isConnected
-          ? Colors.green.withOpacity(0.2)
-          : Theme.of(context).colorScheme.surfaceVariant,
-      borderRadius: BorderRadius.circular(12),
-      child: InkWell(
-        onTap: _isConnected ? _disconnectDevice : _connectToDevice,
-        borderRadius: BorderRadius.circular(12),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                Icons.usb,
-                color: _isConnected
-                    ? Colors.green
-                    : Theme.of(context).colorScheme.onSurfaceVariant,
-                size: 18,
-              ),
-              const SizedBox(width: 6),
-              Text(
-                _isConnected ? 'Connected' : 'Connect',
-                style: TextStyle(
-                  color: _isConnected
-                      ? Colors.green
-                      : Theme.of(context).colorScheme.onSurfaceVariant,
-                  fontWeight: FontWeight.w600,
-                  fontSize: 13,
-                ),
-              ),
-            ],
-          ),
+    try {
+      final patternData = {
+        'pattern': pattern.colors
+            .map((c) => {
+                  'r': c.red,
+                  'g': c.green,
+                  'b': c.blue,
+                })
+            .toList(),
+        'count': pattern.colors.length,
+        'transition': pattern.transition,
+      };
+
+      await widget.deviceState.sendPattern(patternData);
+      _showSnackBar('Pattern sent to device!', Icons.check_circle);
+    } catch (e) {
+      _showSnackBar('Failed to send pattern', Icons.error);
+    }
+  }
+
+  void _copyPatternToCreate(SavedPattern pattern) {
+    widget.deviceState.setPatternToCopy(pattern);
+    _showSnackBar('Pattern ready to load in Create tab', Icons.info);
+  }
+
+  Future<void> _exportPattern(SavedPattern pattern) async {
+    try {
+      final jsonString = jsonEncode(pattern.toJson());
+      final directory = await getApplicationDocumentsDirectory();
+      final file = File('${directory.path}/${pattern.name}.huj');
+      await file.writeAsString(jsonString);
+
+      await Share.shareXFiles(
+        [XFile(file.path)],
+        subject: 'HUJ Pattern: ${pattern.name}',
+      );
+
+      _showSnackBar('Pattern exported', Icons.share);
+    } catch (e) {
+      _showSnackBar('Failed to export pattern', Icons.error);
+    }
+  }
+
+  Future<void> _deletePattern(SavedPattern pattern) async {
+    final prefs = await SharedPreferences.getInstance();
+    final patterns = prefs.getStringList('saved_patterns') ?? [];
+    patterns.removeWhere((json) {
+      final p = SavedPattern.fromJson(jsonDecode(json));
+      return p.name == pattern.name && p.savedAt == pattern.savedAt;
+    });
+    await prefs.setStringList('saved_patterns', patterns);
+    await _loadPatterns();
+    _showSnackBar('Pattern deleted', Icons.delete);
+  }
+
+  void _showSnackBar(String message, IconData icon) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          children: [
+            Icon(icon, color: Colors.white),
+            const SizedBox(width: 12),
+            Expanded(child: Text(message, style: const TextStyle(color: Colors.white))),
+          ],
         ),
-      ),
-    );
-  }
-
-  Widget _buildEmptyState() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Container(
-            padding: const EdgeInsets.all(32),
-            decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.surfaceVariant.withOpacity(0.3),
-              shape: BoxShape.circle,
-            ),
-            child: Icon(
-              Icons.palette_outlined,
-              size: 64,
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
-            ),
-          ),
-          const SizedBox(height: 24),
-          Text(
-            'No colors yet',
-            style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                  fontWeight: FontWeight.w600,
-                ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Tap the + button to add your first color',
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildColorCard(int index) {
-    return Card(
-      elevation: 0,
-      color: colorPattern[index],
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: BorderSide(
-          color: Theme.of(context).colorScheme.outline.withOpacity(0.2),
-          width: 1,
-        ),
-      ),
-      child: Stack(
-        children: [
-          Center(
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.6),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Text(
-                '#${colorPattern[index].value.toRadixString(16).substring(2).toUpperCase()}',
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                  fontFamily: 'monospace',
-                ),
-              ),
-            ),
-          ),
-          // Delete button in top right
-          Positioned(
-            top: 4,
-            right: 4,
-            child: Material(
-              color: Colors.black.withOpacity(0.6),
-              borderRadius: BorderRadius.circular(8),
-              child: InkWell(
-                onTap: () {
-                  setState(() {
-                    colorPattern.removeAt(index);
-                  });
-                  _showSnackBar('Color removed', Icons.delete_outline);
-                },
-                borderRadius: BorderRadius.circular(8),
-                child: const Padding(
-                  padding: EdgeInsets.all(4),
-                  child: Icon(
-                    Icons.close,
-                    color: Colors.white,
-                    size: 16,
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildBottomActionBar() {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 90, left: 16, right: 16),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surfaceVariant,
-        borderRadius: BorderRadius.circular(24),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // Transition selector
-          Row(
-            children: [
-              Icon(
-                Icons.animation,
-                size: 20,
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
-              const SizedBox(width: 8),
-              Text(
-                'Transition:',
-                style: TextStyle(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  fontWeight: FontWeight.w600,
-                  fontSize: 13,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Row(
-                    children: _transitions.map((transition) {
-                      final isSelected = _selectedTransition == transition['id'];
-                      return Padding(
-                        padding: const EdgeInsets.only(right: 8),
-                        child: Material(
-                          color: isSelected
-                              ? Theme.of(context).colorScheme.primaryContainer
-                              : Theme.of(context).colorScheme.surface,
-                          borderRadius: BorderRadius.circular(12),
-                          child: InkWell(
-                            onTap: () {
-                              setState(() {
-                                _selectedTransition = transition['id']!;
-                              });
-                            },
-                            borderRadius: BorderRadius.circular(12),
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 12,
-                                vertical: 8,
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Text(
-                                    transition['icon']!,
-                                    style: const TextStyle(fontSize: 16),
-                                  ),
-                                  const SizedBox(width: 4),
-                                  Text(
-                                    transition['name']!,
-                                    style: TextStyle(
-                                      color: isSelected
-                                          ? Theme.of(context)
-                                              .colorScheme
-                                              .onPrimaryContainer
-                                          : Theme.of(context)
-                                              .colorScheme
-                                              .onSurface,
-                                      fontWeight: FontWeight.w600,
-                                      fontSize: 12,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ),
-                      );
-                    }).toList(),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          // Action buttons
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: [
-              _buildActionButton(
-                icon: Icons.download,
-                label: 'Read',
-                onPressed: !_isConnected || _isReading ? null : _readPatternFromDevice,
-                isLoading: _isReading,
-              ),
-              _buildActionButton(
-                icon: Icons.save,
-                label: 'Save',
-                onPressed: colorPattern.isEmpty ? null : _saveCurrentPattern,
-              ),
-              _buildActionButton(
-                icon: Icons.send,
-                label: 'Send',
-                onPressed: colorPattern.isEmpty ? null : _sendPattern,
-                isPrimary: true,
-              ),
-              _buildActionButton(
-                icon: Icons.clear_all,
-                label: 'Clear',
-                onPressed: colorPattern.isEmpty
-                    ? null
-                    : () {
-                        setState(() {
-                          colorPattern.clear();
-                        });
-                        _showSnackBar('Pattern cleared', Icons.delete_sweep);
-                      },
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildActionButton({
-    required IconData icon,
-    required String label,
-    required VoidCallback? onPressed,
-    bool isPrimary = false,
-    bool isLoading = false,
-  }) {
-    final colorScheme = Theme.of(context).colorScheme;
-
-    return Expanded(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 4),
-        child: Material(
-          color: onPressed == null
-              ? colorScheme.surfaceVariant
-              : isPrimary
-                  ? colorScheme.primaryContainer
-                  : colorScheme.surface,
-          borderRadius: BorderRadius.circular(16),
-          child: InkWell(
-            onTap: onPressed,
-            borderRadius: BorderRadius.circular(16),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 16),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  isLoading
-                      ? SizedBox(
-                          width: 24,
-                          height: 24,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: isPrimary
-                                ? colorScheme.onPrimaryContainer
-                                : colorScheme.onSurface,
-                          ),
-                        )
-                      : Icon(
-                          icon,
-                          color: onPressed == null
-                              ? colorScheme.onSurfaceVariant.withOpacity(0.38)
-                              : isPrimary
-                                  ? colorScheme.onPrimaryContainer
-                                  : colorScheme.onSurface,
-                        ),
-                  const SizedBox(height: 4),
-                  Text(
-                    label,
-                    style: TextStyle(
-                      color: onPressed == null
-                          ? colorScheme.onSurfaceVariant.withOpacity(0.38)
-                          : isPrimary
-                              ? colorScheme.onPrimaryContainer
-                              : colorScheme.onSurface,
-                      fontWeight: FontWeight.w600,
-                      fontSize: 12,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: const Color(0xFF1A1A1A),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        margin: const EdgeInsets.fromLTRB(16, 16, 16, 100),
+        duration: const Duration(seconds: 2),
       ),
     );
   }

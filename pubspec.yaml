@@ -1,5 +1,5 @@
-name: HujLink
-description: Link app for all Huj compatible devices.
+name: huj_colour_hub
+description: HUJ Colour Hub - Control app for Huj compatible devices.
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -22,3 +22,13 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+  assets:
+    - assets/fonts/
+    - assets/hujlogo.png
+
+  fonts:
+    - family: Raleway
+      fonts:
+        - asset: assets/fonts/Raleway-Regular.ttf
+          weight: 400
