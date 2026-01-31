@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/services.dart';
 import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 import 'package:usb_serial/usb_serial.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -315,6 +316,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> with Ticker
   late PageController _pageController;
   late AnimationController _glowController;
   final GlobalKey<_LibraryScreenState> _libraryKey = GlobalKey<_LibraryScreenState>();
+  late List<Widget> _screens;
 
   @override
   void initState() {
@@ -328,6 +330,12 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> with Ticker
       vsync: this,
       duration: const Duration(seconds: 4),
     )..repeat();
+
+    // Initialize screens once to preserve state
+    _screens = [
+      PatternCreatorScreen(deviceState: _deviceState),
+      LibraryScreen(key: _libraryKey, deviceState: _deviceState),
+    ];
 
     // Auto-connect with retry
     _autoConnect();
@@ -358,11 +366,6 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> with Ticker
 
   @override
   Widget build(BuildContext context) {
-    final screens = [
-      PatternCreatorScreen(deviceState: _deviceState),
-      LibraryScreen(key: _libraryKey, deviceState: _deviceState),
-    ];
-
     return Scaffold(
       body: PageView(
         controller: _pageController,
@@ -374,7 +377,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> with Ticker
             _libraryKey.currentState?._loadPatterns();
           }
         },
-        children: screens,
+        children: _screens,
       ),
       bottomNavigationBar: AnimatedBuilder(
         animation: _glowController,
@@ -474,7 +477,7 @@ class PatternCreatorScreen extends StatefulWidget {
   State<PatternCreatorScreen> createState() => _PatternCreatorScreenState();
 }
 
-class _PatternCreatorScreenState extends State<PatternCreatorScreen> with TickerProviderStateMixin {
+class _PatternCreatorScreenState extends State<PatternCreatorScreen> with TickerProviderStateMixin, AutomaticKeepAliveClientMixin {
   List<Color> colourPattern = [];
   String _selectedTransition = 'instant';
   late AnimationController _glowController;
@@ -482,6 +485,9 @@ class _PatternCreatorScreenState extends State<PatternCreatorScreen> with Ticker
   Color _pickerColour = Colors.deepPurple;
   int _logoTapCount = 0;
   DateTime? _lastLogoTap;
+
+  @override
+  bool get wantKeepAlive => true;
 
   final List<Map<String, String>> _transitions = [
     {'id': 'instant', 'name': 'Instant'},
@@ -514,6 +520,7 @@ class _PatternCreatorScreenState extends State<PatternCreatorScreen> with Ticker
 
   @override
   Widget build(BuildContext context) {
+    super.build(context); // Required for AutomaticKeepAliveClientMixin
     return Scaffold(
       backgroundColor: const Color(0xFF0F0F0F),
       body: SafeArea(
@@ -532,7 +539,9 @@ class _PatternCreatorScreenState extends State<PatternCreatorScreen> with Ticker
                   },
                 ),
                 Expanded(
-                  child: colourPattern.isEmpty ? _buildEmptyState() : _buildColourGrid(),
+                  child: _selectedTransition == 'color_wheel'
+                      ? _buildRainbowWheel()
+                      : (colourPattern.isEmpty ? _buildEmptyState() : _buildColourGrid()),
                 ),
                 AnimatedContainer(
                   duration: const Duration(milliseconds: 300),
@@ -617,6 +626,7 @@ class _PatternCreatorScreenState extends State<PatternCreatorScreen> with Ticker
           ),
           TextButton(
             onPressed: () {
+              HapticFeedback.lightImpact();
               setState(() {
                 colourPattern = List.from(pattern.colors);
                 _selectedTransition = pattern.transition;
@@ -627,7 +637,10 @@ class _PatternCreatorScreenState extends State<PatternCreatorScreen> with Ticker
             child: const Text('Load', style: TextStyle(color: Color(0xFFFF8C00))),
           ),
           TextButton(
-            onPressed: () => widget.deviceState.setPatternToCopy(null),
+            onPressed: () {
+              HapticFeedback.lightImpact();
+              widget.deviceState.setPatternToCopy(null);
+            },
             child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
           ),
         ],
@@ -688,49 +701,123 @@ class _PatternCreatorScreenState extends State<PatternCreatorScreen> with Ticker
           );
         }
 
-        return GestureDetector(
-          onTap: () async {
-            if (isConnected) {
-              await widget.deviceState.disconnect();
-              _showSnackBar('Disconnected', Icons.power_off);
-            } else {
-              final result = await widget.deviceState.connect();
-              _showSnackBar(result, isConnected ? Icons.check_circle : Icons.error);
-            }
-          },
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            decoration: BoxDecoration(
-              color: isConnected
-                  ? const Color(0xFF00CC00).withOpacity(0.1)
-                  : Colors.red.withOpacity(0.1),
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(
-                color: isConnected ? const Color(0xFF00CC00) : Colors.red,
-                width: 2,
-              ),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  isConnected ? Icons.usb : Icons.usb_off,
-                  color: isConnected ? const Color(0xFF00CC00) : Colors.red,
-                  size: 20,
-                ),
-                const SizedBox(width: 8),
-                Text(
-                  isConnected ? 'Connected' : 'Disconnected',
-                  style: TextStyle(
+        return AnimatedBuilder(
+          animation: _glowController,
+          builder: (context, child) {
+            final glowColor = _getGlowColor();
+            return GestureDetector(
+              onTap: () async {
+                HapticFeedback.lightImpact();
+                if (isConnected) {
+                  await widget.deviceState.disconnect();
+                  _showSnackBar('Disconnected', Icons.power_off);
+                } else {
+                  final result = await widget.deviceState.connect();
+                  _showSnackBar(result, isConnected ? Icons.check_circle : Icons.error);
+                }
+              },
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                decoration: BoxDecoration(
+                  color: isConnected
+                      ? const Color(0xFF00CC00).withOpacity(0.1)
+                      : const Color(0xFF0F0F0F),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(
                     color: isConnected ? const Color(0xFF00CC00) : Colors.red,
-                    fontWeight: FontWeight.w600,
+                    width: 2,
                   ),
+                  boxShadow: isConnected
+                      ? null
+                      : [
+                          BoxShadow(
+                            color: glowColor.withOpacity(0.4),
+                            blurRadius: 12,
+                            spreadRadius: 2,
+                          ),
+                        ],
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      isConnected ? Icons.usb : Icons.usb_off,
+                      color: isConnected ? const Color(0xFF00CC00) : Colors.red,
+                      size: 20,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      isConnected ? 'Connected' : 'Disconnected',
+                      style: TextStyle(
+                        color: isConnected ? const Color(0xFF00CC00) : Colors.red,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Color _getGlowColor() {
+    final glowColours = colourPattern.isNotEmpty ? colourPattern : widget.deviceState.currentPatternColours;
+    if (glowColours.isEmpty) return Colors.grey;
+
+    final t = _glowController.value;
+    final index = (t * glowColours.length).floor() % glowColours.length;
+    final nextIndex = (index + 1) % glowColours.length;
+    final localT = (t * glowColours.length) - index;
+
+    return Color.lerp(glowColours[index], glowColours[nextIndex], localT)!;
+  }
+
+  Widget _buildRainbowWheel() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Container(
+            width: 200,
+            height: 200,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: const SweepGradient(
+                colors: [
+                  Colors.red,
+                  Colors.orange,
+                  Colors.yellow,
+                  Colors.green,
+                  Colors.cyan,
+                  Colors.blue,
+                  Colors.purple,
+                  Colors.pink,
+                  Colors.red,
+                ],
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.purple.withOpacity(0.5),
+                  blurRadius: 30,
+                  spreadRadius: 10,
                 ),
               ],
             ),
           ),
-        );
-      },
+          const SizedBox(height: 24),
+          Text(
+            'Rainbow Mode',
+            style: TextStyle(
+              color: Colors.grey.shade400,
+              fontSize: 20,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -774,6 +861,7 @@ class _PatternCreatorScreenState extends State<PatternCreatorScreen> with Ticker
       itemBuilder: (context, index) {
         return GestureDetector(
           onTap: () {
+            HapticFeedback.lightImpact();
             setState(() {
               colourPattern.removeAt(index);
               widget.deviceState.updatePatternColours(colourPattern);
@@ -826,7 +914,7 @@ class _PatternCreatorScreenState extends State<PatternCreatorScreen> with Ticker
   Widget _buildTransitionSelector() {
     return Container(
       margin: const EdgeInsets.fromLTRB(24, 8, 24, 16),
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.symmetric(vertical: 16),
       decoration: BoxDecoration(
         color: const Color(0xFF1A1A1A),
         borderRadius: BorderRadius.circular(16),
@@ -834,50 +922,64 @@ class _PatternCreatorScreenState extends State<PatternCreatorScreen> with Ticker
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'Transition Effect',
-            style: TextStyle(
-              color: Colors.grey.shade400,
-              fontWeight: FontWeight.w600,
-              fontSize: 14,
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Text(
+              'Transition Effect',
+              style: TextStyle(
+                color: Colors.grey.shade400,
+                fontWeight: FontWeight.w600,
+                fontSize: 14,
+              ),
             ),
           ),
           const SizedBox(height: 12),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: _transitions.map((transition) {
-              final isSelected = _selectedTransition == transition['id'];
-              return GestureDetector(
-                onTap: () {
-                  setState(() => _selectedTransition = transition['id']!);
-                },
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                  decoration: BoxDecoration(
-                    color: isSelected
-                        ? const Color(0xFFFF8C00).withOpacity(0.2)
-                        : Colors.transparent,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                      color: isSelected
-                          ? const Color(0xFFFF8C00)
-                          : Colors.grey.shade700,
-                      width: 2,
+          SizedBox(
+            height: 44,
+            child: ListView.builder(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              itemCount: _transitions.length,
+              itemBuilder: (context, index) {
+                final transition = _transitions[index];
+                final isSelected = _selectedTransition == transition['id'];
+                return Padding(
+                  padding: EdgeInsets.only(right: index < _transitions.length - 1 ? 8 : 0),
+                  child: GestureDetector(
+                    onTap: () {
+                      HapticFeedback.lightImpact();
+                      setState(() => _selectedTransition = transition['id']!);
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: isSelected
+                            ? const Color(0xFFFF8C00).withOpacity(0.2)
+                            : Colors.transparent,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: isSelected
+                              ? const Color(0xFFFF8C00)
+                              : Colors.grey.shade700,
+                          width: 2,
+                        ),
+                      ),
+                      child: Center(
+                        child: Text(
+                          transition['name']!,
+                          style: TextStyle(
+                            color: isSelected
+                                ? const Color(0xFFFF8C00)
+                                : Colors.grey.shade400,
+                            fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
+                          ),
+                        ),
+                      ),
                     ),
                   ),
-                  child: Text(
-                    transition['name']!,
-                    style: TextStyle(
-                      color: isSelected
-                          ? const Color(0xFFFF8C00)
-                          : Colors.grey.shade400,
-                      fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
-                    ),
-                  ),
-                ),
-              );
-            }).toList(),
+                );
+              },
+            ),
           ),
         ],
       ),
@@ -894,6 +996,7 @@ class _PatternCreatorScreenState extends State<PatternCreatorScreen> with Ticker
               onPressed: colourPattern.isEmpty
                   ? null
                   : () {
+                      HapticFeedback.mediumImpact();
                       setState(() {
                         colourPattern.clear();
                         widget.deviceState.updatePatternColours(colourPattern);
@@ -921,19 +1024,54 @@ class _PatternCreatorScreenState extends State<PatternCreatorScreen> with Ticker
           const SizedBox(width: 12),
           Expanded(
             child: ElevatedButton(
-              onPressed: () {
-                setState(() {
-                  _isColourPickerVisible = true;
-                });
-              },
+              onPressed: colourPattern.isEmpty
+                  ? null
+                  : () {
+                      HapticFeedback.lightImpact();
+                      _savePattern();
+                    },
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF1A1A1A),
                 foregroundColor: const Color(0xFFFF8C00),
+                disabledBackgroundColor: const Color(0xFF1A1A1A).withOpacity(0.5),
+                disabledForegroundColor: Colors.grey.shade700,
                 padding: const EdgeInsets.symmetric(vertical: 16),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(16),
-                  side: const BorderSide(
-                    color: Color(0xFFFF8C00),
+                  side: BorderSide(
+                    color: colourPattern.isEmpty
+                        ? Colors.grey.shade800
+                        : const Color(0xFFFF8C00),
+                    width: 2,
+                  ),
+                ),
+              ),
+              child: const Icon(Icons.save),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: ElevatedButton(
+              onPressed: _selectedTransition == 'color_wheel'
+                  ? null
+                  : () {
+                      HapticFeedback.lightImpact();
+                      setState(() {
+                        _isColourPickerVisible = true;
+                      });
+                    },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF1A1A1A),
+                foregroundColor: const Color(0xFFFF8C00),
+                disabledBackgroundColor: const Color(0xFF1A1A1A).withOpacity(0.5),
+                disabledForegroundColor: Colors.grey.shade700,
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                  side: BorderSide(
+                    color: _selectedTransition == 'color_wheel'
+                        ? Colors.grey.shade800
+                        : const Color(0xFFFF8C00),
                     width: 2,
                   ),
                 ),
@@ -945,9 +1083,10 @@ class _PatternCreatorScreenState extends State<PatternCreatorScreen> with Ticker
           Expanded(
             flex: 2,
             child: ElevatedButton(
-              onPressed: colourPattern.isEmpty
+              onPressed: (colourPattern.isEmpty && _selectedTransition != 'color_wheel')
                   ? null
                   : () async {
+                      HapticFeedback.mediumImpact();
                       await _sendPattern();
                     },
               style: ElevatedButton.styleFrom(
@@ -1014,23 +1153,27 @@ class _PatternCreatorScreenState extends State<PatternCreatorScreen> with Ticker
               ),
             ),
             Expanded(
-              child: ColorPicker(
-                pickerColor: _pickerColour,
-                onColorChanged: (color) {
-                  setState(() {
-                    _pickerColour = color;
-                  });
-                },
-                pickerAreaHeightPercent: 0.8,
-                displayThumbColor: true,
-                enableAlpha: false,
-                labelTypes: const [],
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 24, 16, 0),
+                child: ColorPicker(
+                  pickerColor: _pickerColour,
+                  onColorChanged: (color) {
+                    setState(() {
+                      _pickerColour = color;
+                    });
+                  },
+                  pickerAreaHeightPercent: 0.65,
+                  displayThumbColor: true,
+                  enableAlpha: false,
+                  labelTypes: const [],
+                ),
               ),
             ),
             Padding(
-              padding: const EdgeInsets.all(24),
+              padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
               child: ElevatedButton(
                 onPressed: () {
+                  HapticFeedback.lightImpact();
                   setState(() {
                     colourPattern.add(_pickerColour);
                     widget.deviceState.updatePatternColours(colourPattern);
@@ -1072,26 +1215,43 @@ class _PatternCreatorScreenState extends State<PatternCreatorScreen> with Ticker
       return;
     }
 
-    if (colourPattern.isEmpty) {
+    if (colourPattern.isEmpty && _selectedTransition != 'color_wheel') {
       _showSnackBar('Add colours first', Icons.info);
       return;
     }
 
     try {
-      final patternData = {
-        'pattern': colourPattern
-            .map((c) => {
-                  'r': c.red,
-                  'g': c.green,
-                  'b': c.blue,
-                })
-            .toList(),
-        'count': colourPattern.length,
-        'transition': _selectedTransition,
-      };
+      final Map<String, dynamic> patternData;
+
+      if (_selectedTransition == 'color_wheel') {
+        // Rainbow mode: send white color with color_wheel transition
+        patternData = {
+          'pattern': [
+            {'r': 255, 'g': 255, 'b': 255}
+          ],
+          'count': 1,
+          'transition': 'color_wheel',
+        };
+      } else {
+        // Normal mode: send color pattern
+        patternData = {
+          'pattern': colourPattern
+              .map((c) => {
+                    'r': c.red,
+                    'g': c.green,
+                    'b': c.blue,
+                  })
+              .toList(),
+          'count': colourPattern.length,
+          'transition': _selectedTransition,
+        };
+      }
 
       await widget.deviceState.sendPattern(patternData);
-      _showSnackBar('Pattern sent successfully!', Icons.check_circle);
+      _showSnackBar(
+        _selectedTransition == 'color_wheel' ? 'Rainbow mode activated!' : 'Pattern sent successfully!',
+        _selectedTransition == 'color_wheel' ? Icons.gradient : Icons.check_circle,
+      );
     } catch (e) {
       _showSnackBar('Failed to send pattern', Icons.error);
     }
@@ -1110,7 +1270,7 @@ class _PatternCreatorScreenState extends State<PatternCreatorScreen> with Ticker
         behavior: SnackBarBehavior.floating,
         backgroundColor: const Color(0xFF1A1A1A),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        margin: const EdgeInsets.fromLTRB(16, 16, 16, 100),
+        margin: const EdgeInsets.fromLTRB(16, 16, 16, 180),
         duration: const Duration(seconds: 2),
       ),
     );
@@ -1187,10 +1347,13 @@ class LibraryScreen extends StatefulWidget {
   State<LibraryScreen> createState() => _LibraryScreenState();
 }
 
-class _LibraryScreenState extends State<LibraryScreen> with TickerProviderStateMixin {
+class _LibraryScreenState extends State<LibraryScreen> with TickerProviderStateMixin, AutomaticKeepAliveClientMixin {
   bool _isDownloading = false;
   List<SavedPattern> _savedPatterns = [];
   late AnimationController _glowController;
+
+  @override
+  bool get wantKeepAlive => true;
 
   @override
   void initState() {
@@ -1262,9 +1425,12 @@ class _LibraryScreenState extends State<LibraryScreen> with TickerProviderStateM
         final glowOpacity = 0.3 + (0.2 * (glowProgress - 0.5).abs() * 2);
 
         return GestureDetector(
-          onTap: () => _sendPattern(pattern),
+          onTap: () {
+            HapticFeedback.lightImpact();
+            _sendPattern(pattern);
+          },
           child: Container(
-            margin: const EdgeInsets.only(bottom: 16),
+            margin: const EdgeInsets.only(top: 8, bottom: 16),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(20),
               boxShadow: [
@@ -1333,25 +1499,47 @@ class _LibraryScreenState extends State<LibraryScreen> with TickerProviderStateM
                 Container(
                   height: 60,
                   margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                  child: ListView.builder(
-                    scrollDirection: Axis.horizontal,
-                    itemCount: pattern.colors.length,
-                    itemBuilder: (context, index) {
-                      return Container(
-                        width: 50,
-                        height: 50,
-                        margin: const EdgeInsets.only(right: 8),
-                        decoration: BoxDecoration(
-                          color: pattern.colors[index],
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                            color: Colors.white.withOpacity(0.2),
-                            width: 2,
+                  child: pattern.transition == 'color_wheel'
+                      ? Container(
+                          decoration: BoxDecoration(
+                            gradient: const LinearGradient(
+                              colors: [
+                                Colors.red,
+                                Colors.orange,
+                                Colors.yellow,
+                                Colors.green,
+                                Colors.cyan,
+                                Colors.blue,
+                                Colors.purple,
+                                Colors.pink,
+                              ],
+                            ),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: Colors.white.withOpacity(0.2),
+                              width: 2,
+                            ),
                           ),
+                        )
+                      : ListView.builder(
+                          scrollDirection: Axis.horizontal,
+                          itemCount: pattern.colors.length,
+                          itemBuilder: (context, index) {
+                            return Container(
+                              width: 50,
+                              height: 50,
+                              margin: const EdgeInsets.only(right: 8),
+                              decoration: BoxDecoration(
+                                color: pattern.colors[index],
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: Colors.white.withOpacity(0.2),
+                                  width: 2,
+                                ),
+                              ),
+                            );
+                          },
                         ),
-                      );
-                    },
-                  ),
                 ),
               ],
             ),
@@ -1364,6 +1552,7 @@ class _LibraryScreenState extends State<LibraryScreen> with TickerProviderStateM
 
   @override
   Widget build(BuildContext context) {
+    super.build(context); // Required for AutomaticKeepAliveClientMixin
     return Scaffold(
       backgroundColor: const Color(0xFF0F0F0F),
       body: SafeArea(
@@ -1377,7 +1566,7 @@ class _LibraryScreenState extends State<LibraryScreen> with TickerProviderStateM
                     'Pattern Library',
                     style: TextStyle(
                       color: Colors.white,
-                      fontSize: 28,
+                      fontSize: 22,
                       fontWeight: FontWeight.bold,
                     ),
                   ),
@@ -1387,13 +1576,16 @@ class _LibraryScreenState extends State<LibraryScreen> with TickerProviderStateM
                     builder: (context, _) {
                       return ElevatedButton.icon(
                         onPressed: widget.deviceState.isConnected && !_isDownloading
-                            ? _downloadFromChip
+                            ? () {
+                                HapticFeedback.lightImpact();
+                                _downloadFromChip();
+                              }
                             : null,
                         style: ElevatedButton.styleFrom(
                           backgroundColor: const Color(0xFFFF8C00),
                           foregroundColor: Colors.white,
                           disabledBackgroundColor: const Color(0xFFFF8C00).withOpacity(0.3),
-                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(12),
                           ),
@@ -1407,8 +1599,8 @@ class _LibraryScreenState extends State<LibraryScreen> with TickerProviderStateM
                                   color: Colors.white,
                                 ),
                               )
-                            : const Icon(Icons.download),
-                        label: const Text('Get from Chip'),
+                            : const Icon(Icons.download, size: 20),
+                        label: const Text('From Chip', style: TextStyle(fontSize: 13)),
                       );
                     },
                   ),
@@ -1498,7 +1690,10 @@ class _LibraryScreenState extends State<LibraryScreen> with TickerProviderStateM
 
   Widget _buildPatternCard(SavedPattern pattern) {
     return GestureDetector(
-      onTap: () => _sendPattern(pattern),
+      onTap: () {
+        HapticFeedback.lightImpact();
+        _sendPattern(pattern);
+      },
       child: Container(
         margin: const EdgeInsets.only(bottom: 16),
         decoration: BoxDecoration(
@@ -1591,25 +1786,47 @@ class _LibraryScreenState extends State<LibraryScreen> with TickerProviderStateM
             Container(
               height: 60,
               margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-              child: ListView.builder(
-                scrollDirection: Axis.horizontal,
-                itemCount: pattern.colors.length,
-                itemBuilder: (context, index) {
-                  return Container(
-                    width: 50,
-                    height: 50,
-                    margin: const EdgeInsets.only(right: 8),
-                    decoration: BoxDecoration(
-                      color: pattern.colors[index],
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                        color: Colors.white.withOpacity(0.2),
-                        width: 2,
+              child: pattern.transition == 'color_wheel'
+                  ? Container(
+                      decoration: BoxDecoration(
+                        gradient: const LinearGradient(
+                          colors: [
+                            Colors.red,
+                            Colors.orange,
+                            Colors.yellow,
+                            Colors.green,
+                            Colors.cyan,
+                            Colors.blue,
+                            Colors.purple,
+                            Colors.pink,
+                          ],
+                        ),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: Colors.white.withOpacity(0.2),
+                          width: 2,
+                        ),
                       ),
+                    )
+                  : ListView.builder(
+                      scrollDirection: Axis.horizontal,
+                      itemCount: pattern.colors.length,
+                      itemBuilder: (context, index) {
+                        return Container(
+                          width: 50,
+                          height: 50,
+                          margin: const EdgeInsets.only(right: 8),
+                          decoration: BoxDecoration(
+                            color: pattern.colors[index],
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: Colors.white.withOpacity(0.2),
+                              width: 2,
+                            ),
+                          ),
+                        );
+                      },
                     ),
-                  );
-                },
-              ),
             ),
           ],
         ),
@@ -1691,7 +1908,7 @@ class _LibraryScreenState extends State<LibraryScreen> with TickerProviderStateM
         behavior: SnackBarBehavior.floating,
         backgroundColor: const Color(0xFF1A1A1A),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        margin: const EdgeInsets.fromLTRB(16, 16, 16, 100),
+        margin: const EdgeInsets.fromLTRB(16, 16, 16, 180),
         duration: const Duration(seconds: 2),
       ),
     );
