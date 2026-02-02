@@ -7,7 +7,8 @@
       "WebFetch(domain:gitlab.com)",
       "Bash(flutter build:*)",
       "Bash(git checkout:*)",
-      "Bash(flutter analyze:*)"
+      "Bash(flutter analyze:*)",
+      "Bash(ls:*)"
     ]
   }
 }

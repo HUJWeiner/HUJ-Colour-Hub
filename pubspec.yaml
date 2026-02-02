@@ -14,6 +14,7 @@ dependencies:
   shared_preferences: ^2.2.2
   path_provider: ^2.1.1
   share_plus: ^7.2.1
+  flutter_cube: ^0.1.1
 
 dev_dependencies:
   flutter_test:
@@ -26,6 +27,10 @@ flutter:
   assets:
     - assets/fonts/
     - assets/hujlogo.png
+    - assets/ledring.obj
+    - assets/ledring.mtl
+    - assets/leds.obj
+    - assets/leds.mtl
 
   fonts:
     - family: Raleway
