@@ -11,7 +11,7 @@ import 'package:usb_serial/usb_serial.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
-import 'package:flutter_cube/flutter_cube.dart' as cube;
+import 'package:three_js/three_js.dart' as three;
 
 void main() {
   runApp(const MyApp());
@@ -488,15 +488,13 @@ class _PatternCreatorScreenState extends State<PatternCreatorScreen> with Ticker
   int _editingColorIndex = -1; // -1 means adding new, >=0 means editing existing
   int _logoTapCount = 0;
   DateTime? _lastLogoTap;
-  int _tick = 0; // For forcing rebuilds on animation
+  final int _tick = 0; // For forcing rebuilds on animation
   Timer? _renderTimer; // For 60fps rendering
   final ValueNotifier<int> _renderTick = ValueNotifier<int>(0); // For triggering rebuilds
   int _renderCounter = 0; // Counter for render ticks
 
-  // References for live 3D color updates
-  cube.Scene? _scene;
-  cube.Object? _ledsObject;
-  String _currentLedsPath = 'assets/leds.obj';
+  // References for 3D renderer
+  double _currentRotationY = 0;
 
   @override
   bool get wantKeepAlive => true;
@@ -525,19 +523,14 @@ class _PatternCreatorScreenState extends State<PatternCreatorScreen> with Ticker
       duration: const Duration(seconds: 4),
     )..repeat();
 
-    // Start 60fps render timer
-    _renderTimer = Timer.periodic(const Duration(milliseconds: 16), (_) {
+    // Do not pre-populate colours on startup; start with an empty pattern
+
+    // Start render timer for rotation
+    _renderTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
       if (mounted) {
-        if (_ledsObject != null) {
-          final currentColor = colourPattern.isEmpty ? Colors.grey : _getGlowColor();
-          _updateLEDColor(currentColor);
-          // Force redraw with tiny rotation
-          _autoRotateAngle += 0.002;
-          _ledsObject!.rotation.y = _autoRotateAngle;
-        }
-        // Trigger Cube rebuild to force re-render
-        _renderCounter++;
-        _renderTick.value = _renderCounter;
+        setState(() {
+          _currentRotationY += 0.02; // Radians per frame
+        });
       }
     });
   }
@@ -692,6 +685,8 @@ class _PatternCreatorScreenState extends State<PatternCreatorScreen> with Ticker
       _showSnackBar('Easter egg found! 🎉', Icons.celebration);
     }
   }
+
+
 
   Widget _buildConnectionIndicator() {
     return ListenableBuilder(
@@ -975,653 +970,127 @@ class _PatternCreatorScreenState extends State<PatternCreatorScreen> with Ticker
     );
   }
 
-  cube.Vector3 _colorToVector3(Color color) {
-    return cube.Vector3(
-      color.red / 255.0,
-      color.green / 255.0,
-      color.blue / 255.0,
-    );
-  }
-
-  Future<String> _updateLEDMaterial(Color color) async {
-    try {
-      // Get temp directory
-      final tempDir = await getTemporaryDirectory();
-      final ledDir = Directory('${tempDir.path}/led_models');
-
-      // Create directory if it doesn't exist
-      if (!await ledDir.exists()) {
-        await ledDir.create(recursive: true);
-      }
-
-      // Copy .obj file from assets to temp
-      final objData = await rootBundle.load('assets/leds.obj');
-      final objFile = File('${ledDir.path}/leds.obj');
-      await objFile.writeAsBytes(objData.buffer.asUint8List());
-
-      // Read original .mtl from assets
-      final mtlData = await rootBundle.loadString('assets/leds.mtl');
-
-      // Modify the material color
-      final r = (color.red / 255.0).toStringAsFixed(6);
-      final g = (color.green / 255.0).toStringAsFixed(6);
-      final b = (color.blue / 255.0).toStringAsFixed(6);
-
-      // Replace Kd values in the LED material
-      String modifiedMtl = mtlData.replaceAllMapped(
-        RegExp(r'(newmtl LED.*?)(Kd\s+)[\d.]+\s+[\d.]+\s+[\d.]+', dotAll: true),
-        (match) => '${match.group(1)}Kd $r $g $b',
-      );
-
-      // Also update Ka (ambient) to match
-      modifiedMtl = modifiedMtl.replaceAllMapped(
-        RegExp(r'(newmtl LED.*?)(Ka\s+)[\d.]+\s+[\d.]+\s+[\d.]+', dotAll: true),
-        (match) => '${match.group(1)}Ka $r $g $b',
-      );
-
-      // Write modified .mtl to temp
-      final mtlFile = File('${ledDir.path}/leds.mtl');
-      await mtlFile.writeAsString(modifiedMtl);
-
-      return '${ledDir.path}/leds.obj';
-    } catch (e) {
-      print('Error updating LED material: $e');
-      return 'assets/leds.obj'; // Fallback to original
-    }
-  }
-
-  void _createLEDRing(cube.Scene scene, double rotX, double rotY, double rotZ, Color ledColor, String ledObjPath) {
-    try {
-      // Store scene reference for live updates
-      _scene = scene;
-
-      // Try loading the ring base (grey metallic)
-      final ringBase = cube.Object(fileName: 'assets/ledring.obj', isAsset: true);
-
-      // Scale up the base to make it bigger
-      ringBase.scale.setValues(2.5, 2.5, 2.5);
-
-      // Apply rotation to base
-      ringBase.rotation.x = rotX;
-      ringBase.rotation.y = rotY;
-      ringBase.rotation.z = rotZ;
-
-      scene.world.add(ringBase);
-
-      // Load the LED segments from temp directory with modified material
-      final leds = cube.Object(fileName: ledObjPath, isAsset: false);
-      _ledsObject = leds;
-
-      // Calculate scale based on transition effect
-      double transitionScale = _getTransitionScale();
-      double baseScale = 2.5; // Match ring base scale
-
-      // Apply rotation to LEDs (same as base)
-      leds.rotation.x = rotX;
-      leds.rotation.y = rotY;
-      leds.rotation.z = rotZ;
-
-      // Apply scale - base size + transition effect
-      double finalScale = baseScale * transitionScale;
-      leds.scale.setValues(finalScale, finalScale, finalScale);
-
-      // Add to scene - material should already be set from modified .mtl file
-      scene.world.add(leds);
-    } catch (e) {
-      // Fallback: Create procedural LED ring if models fail to load
-      print('Failed to load LED ring models: $e');
-      _createProceduralLEDRing(scene, rotX, rotY, rotZ, ledColor);
-    }
-  }
-
-  void _updateLEDColor(Color color) {
-    if (_ledsObject != null && _ledsObject!.mesh != null && _ledsObject!.mesh!.material != null) {
-      _ledsObject!.mesh!.material.diffuse = cube.Vector3(color.red / 255, color.green / 255, color.blue / 255);
-      _ledsObject!.mesh!.material.ambient = cube.Vector3(color.red / 255, color.green / 255, color.blue / 255);
-    }
-  }
-
-
-
-  void _createProceduralLEDRing(cube.Scene scene, double rotX, double rotY, double rotZ, Color ledColor) {
-    const int numLEDs = 60;
-    const double ringRadius = 2.5; // Larger ring
-    const double ledSize = 0.2; // Bigger LEDs
-
-    // Create dark ring frame
-    final ringFrame = cube.Object();
-    ringFrame.mesh = _createTorusFrame(ringRadius, 0.1);
-    ringFrame.mesh.material = cube.Material()
-      ..diffuse = cube.Vector3(0.1, 0.1, 0.1)
-      ..ambient = cube.Vector3(0.05, 0.05, 0.05)
-      ..specular = cube.Vector3(0.2, 0.2, 0.2)
-      ..shininess = 50;
-
-    ringFrame.rotation.x = rotX;
-    ringFrame.rotation.y = rotY;
-    ringFrame.rotation.z = rotZ;
-
-    scene.world.add(ringFrame);
-
-    // Create individual LED segments around the ring
-    for (int i = 0; i < numLEDs; i++) {
-      double angle = (i / numLEDs) * 2 * math.pi;
-      double x = ringRadius * math.cos(angle);
-      double z = ringRadius * math.sin(angle);
-
-      // Get color for this LED from pattern
-      int colorIndex = i % (colourPattern.isEmpty ? 1 : colourPattern.length);
-      Color ledColor = colourPattern.isEmpty ? Colors.grey : colourPattern[colorIndex];
-
-      // Create LED bulb
-      final led = cube.Object();
-      led.mesh = _createLEDSegment(ledSize);
-
-      // Set LED color
-      led.mesh.material = cube.Material()
-        ..diffuse = _colorToVector3(ledColor)
-        ..ambient = _colorToVector3(ledColor)
-        ..specular = cube.Vector3(1.0, 1.0, 1.0)
-        ..shininess = 100;
-
-      // Position LED on the ring
-      led.position.setValues(x, 0, z);
-
-      // Apply rotation
-      led.rotation.x = rotX;
-      led.rotation.y = rotY + (i / numLEDs) * 360;
-      led.rotation.z = rotZ;
-
-      // Add scale based on transition
-      double scale = _getTransitionScale();
-      led.scale.setValues(scale, scale, scale);
-
-      scene.world.add(led);
-    }
-  }
-
-  cube.Mesh _createTorusFrame(double radius, double thickness) {
-    final vertices = <cube.Vector3>[];
-    final texcoords = <Offset>[];
-    final indices = <cube.Polygon>[];
-
-    const int segments = 60;
-    const int tubes = 8;
-
-    for (int i = 0; i <= segments; i++) {
-      double u = i / segments * 2 * math.pi;
-      for (int j = 0; j <= tubes; j++) {
-        double v = j / tubes * 2 * math.pi;
-
-        double x = (radius + thickness * math.cos(v)) * math.cos(u);
-        double z = (radius + thickness * math.cos(v)) * math.sin(u);
-        double y = thickness * math.sin(v);
-
-        vertices.add(cube.Vector3(x, y, z));
-        texcoords.add(Offset(i / segments, j / tubes));
-      }
-    }
-
-    for (int i = 0; i < segments; i++) {
-      for (int j = 0; j < tubes; j++) {
-        int first = i * (tubes + 1) + j;
-        int second = first + tubes + 1;
-
-        indices.add(cube.Polygon(first, second, first + 1));
-        indices.add(cube.Polygon(second, second + 1, first + 1));
-      }
-    }
-
-    return cube.Mesh(
-      vertices: vertices,
-      texcoords: texcoords,
-      indices: indices,
-    );
-  }
-
-  double _getTransitionScale() {
-    double baseScale = 1.0;
-    double animValue = _glowController.value;
-
-    switch (_selectedTransition) {
-      case 'pulse':
-      case 'breathe':
-        double pulseValue = math.sin(animValue * 2 * math.pi);
-        return baseScale + 0.15 * (pulseValue + 1) / 2;
-
-      case 'strobe':
-      case 'blink':
-        return animValue % 0.5 < 0.25 ? baseScale * 1.1 : baseScale * 0.9;
-
-      case 'heartbeat':
-        double beat = animValue % 0.5;
-        return baseScale + 0.2 * (beat < 0.25 ? beat * 4 : (0.5 - beat) * 4);
-
-      case 'bounce':
-        return baseScale + 0.1 * math.sin(animValue * math.pi);
-
-      default:
-        return baseScale;
-    }
-  }
-
-  Color _getLEDColor(int index, int totalLEDs) {
-    if (colourPattern.isEmpty) {
-      return Colors.grey;
-    }
-
-    // Calculate which color this LED should be
-    int patternIndex = index % colourPattern.length;
-
-    // For smooth transitions, blend between colors
-    if (_selectedTransition == 'smooth' || _selectedTransition == 'fade') {
-      double position = (index % colourPattern.length) / colourPattern.length;
-      int colorIndex1 = index % colourPattern.length;
-      int colorIndex2 = (index + 1) % colourPattern.length;
-
-      if (colourPattern.length > 1) {
-        double blend = position * colourPattern.length - colorIndex1;
-        return Color.lerp(colourPattern[colorIndex1], colourPattern[colorIndex2], blend) ?? colourPattern[colorIndex1];
-      }
-    }
-
-    return colourPattern[patternIndex];
-  }
-
-  double _getLEDScale(int index, int totalLEDs) {
-    double baseScale = 1.0;
-
-    switch (_selectedTransition) {
-      case 'pulse':
-      case 'breathe':
-        double pulseValue = math.sin(_glowController.value * 2 * math.pi);
-        return baseScale + 0.5 * (pulseValue + 1) / 2;
-
-      case 'strobe':
-      case 'blink':
-        return _glowController.value % 0.5 < 0.25 ? baseScale * 1.5 : baseScale * 0.5;
-
-      case 'heartbeat':
-        double beat = _glowController.value % 0.5;
-        return baseScale + 0.6 * (beat < 0.25 ? beat * 4 : (0.5 - beat) * 4);
-
-      case 'sparkle':
-        // Random sparkle effect based on LED position and time
-        double sparkle = math.sin((index * 0.1 + _glowController.value * 5) * math.pi);
-        return sparkle > 0.8 ? baseScale * 1.8 : baseScale;
-
-      default:
-        return baseScale;
-    }
-  }
-
-  cube.Mesh _createLEDSegment(double size) {
-    // Create a small sphere for each LED
-    final vertices = <cube.Vector3>[];
-    final texcoords = <Offset>[];
-    final indices = <cube.Polygon>[];
-
-    const int latBands = 8;
-    const int lonBands = 8;
-
-    for (int lat = 0; lat <= latBands; lat++) {
-      double theta = lat * math.pi / latBands;
-      double sinTheta = math.sin(theta);
-      double cosTheta = math.cos(theta);
-
-      for (int lon = 0; lon <= lonBands; lon++) {
-        double phi = lon * 2 * math.pi / lonBands;
-        double sinPhi = math.sin(phi);
-        double cosPhi = math.cos(phi);
-
-        double x = cosPhi * sinTheta;
-        double y = cosTheta;
-        double z = sinPhi * sinTheta;
-
-        vertices.add(cube.Vector3(size * x, size * y, size * z));
-        texcoords.add(Offset(1 - (lon / lonBands), 1 - (lat / latBands)));
-      }
-    }
-
-    for (int lat = 0; lat < latBands; lat++) {
-      for (int lon = 0; lon < lonBands; lon++) {
-        int first = (lat * (lonBands + 1)) + lon;
-        int second = first + lonBands + 1;
-
-        indices.add(cube.Polygon(first, second, first + 1));
-        indices.add(cube.Polygon(second, second + 1, first + 1));
-      }
-    }
-
-    return cube.Mesh(
-      vertices: vertices,
-      texcoords: texcoords,
-      indices: indices,
-    );
-  }
-
-  cube.Mesh _createRingFrame(double radius, double thickness) {
-    // Create a thin torus for the ring frame
-    final vertices = <cube.Vector3>[];
-    final texcoords = <Offset>[];
-    final indices = <cube.Polygon>[];
-
-    const int segments = 60;
-    const int tubes = 8;
-
-    for (int i = 0; i <= segments; i++) {
-      double u = i / segments * 2 * math.pi;
-      for (int j = 0; j <= tubes; j++) {
-        double v = j / tubes * 2 * math.pi;
-
-        double x = (radius + thickness * math.cos(v)) * math.cos(u);
-        double y = (radius + thickness * math.cos(v)) * math.sin(u);
-        double z = thickness * math.sin(v);
-
-        vertices.add(cube.Vector3(x, z, y)); // Swap y and z for horizontal ring
-        texcoords.add(Offset(i / segments, j / tubes));
-      }
-    }
-
-    for (int i = 0; i < segments; i++) {
-      for (int j = 0; j < tubes; j++) {
-        int first = i * (tubes + 1) + j;
-        int second = first + tubes + 1;
-
-        indices.add(cube.Polygon(first, second, first + 1));
-        indices.add(cube.Polygon(second, second + 1, first + 1));
-      }
-    }
-
-    return cube.Mesh(
-      vertices: vertices,
-      texcoords: texcoords,
-      indices: indices,
-    );
-  }
-
 Widget _build3DVisualization() {
   final currentColor = colourPattern.isEmpty ? Colors.grey : _getGlowColor();
 
-  return FutureBuilder<String>(
-    future: _updateLEDMaterial(colourPattern.isNotEmpty ? colourPattern[0] : Colors.grey),
-    builder: (context, snapshot) {
-      if (!snapshot.hasData) {
-        return Container(
-          padding: const EdgeInsets.all(24),
-          child: const Center(child: CircularProgressIndicator()),
-        );
-      }
-
-      final ledObjPath = snapshot.data!;
-
-      return Container(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          children: [
-            // 3D visualization area
-            Expanded(
-              child: RepaintBoundary(
-                child: cube.Cube(
-                  key: ValueKey('cube_${colourPattern.length}_${_selectedTransition}_${(_renderCounter / 30).floor()}'),
-                  interactive: true,
-                  onSceneCreated: (cube.Scene scene) {
-                    _scene = scene;
-                    final color = colourPattern.isEmpty ? Colors.grey : _getGlowColor();
-                    _createLEDRing(scene, 0, 0, 0, color, ledObjPath);
-                    scene.camera.position.setValues(0, 0, 1);
-                    scene.camera.target.setValues(0, 0, 0);
-                    scene.light.position.setValues(10, 10, 10);
-                  },
-                ),
+  return Container(
+    padding: const EdgeInsets.all(24),
+    child: Column(
+      children: [
+        // 3D LED Ring visualization
+        Expanded(
+          child: Container(
+            decoration: BoxDecoration(
+              color: Colors.black.withOpacity(0.3),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                color: currentColor.withOpacity(0.3),
+                width: 2,
               ),
             ),
-            // Color pattern indicator below 3D view
-            const SizedBox(height: 16),
-            Container(
-              height: 60,
-              decoration: BoxDecoration(
-                color: const Color(0xFF1A1A1A),
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: ListView.builder(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.all(8),
-                itemCount: colourPattern.length,
-                itemBuilder: (context, index) {
-                  return GestureDetector(
-                    onTap: () {
-                      HapticFeedback.lightImpact();
-                      _showColorOptions(index);
-                    },
-                    child: Container(
-                      width: 44,
-                      margin: const EdgeInsets.symmetric(horizontal: 4),
-                      decoration: BoxDecoration(
-                        color: colourPattern[index],
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(
-                          color: Colors.white.withOpacity(0.3),
-                          width: 2,
-                        ),
-                        boxShadow: [
-                          BoxShadow(
-                            color: colourPattern[index].withOpacity(0.5),
-                            blurRadius: 8,
-                            spreadRadius: 1,
-                          ),
-                        ],
-                      ),
-                    ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(18),
+              child: three.ThreeJS(
+                onCreated: (three.ThreeController controller) {
+                  // Scene setup
+                  controller.scene.background = three.Color.fromHex32(0x000000);
+                  
+                  // Add lights
+                  final ambientLight = three.AmbientLight(0xffffff, 0.5);
+                  controller.scene.add(ambientLight);
+                  
+                  final pointLight = three.PointLight(0xffffff, 1.0);
+                  pointLight.position.set(5, 5, 5);
+                  controller.scene.add(pointLight);
+                  
+                  // Create torus geometry for LED ring
+                  final geometry = three.TorusGeometry(2, 0.5, 16, 32);
+                  final material = three.MeshStandardMaterial(
+                    color: three.Color.fromHex32(currentColor.value),
+                    emissive: three.Color.fromHex32(currentColor.value),
+                    emissiveIntensity: 0.5,
                   );
+                  final torus = three.Mesh(geometry, material);
+                  controller.scene.add(torus);
+                  
+                  // Camera position
+                  controller.camera.position.set(0, 0, 8);
+                  controller.camera.lookAt(controller.scene.position);
+                  
+                  // Rotate the torus
+                  torus.rotation.y = _currentRotationY;
+                  
+                  // Animation loop to update rotation
+                  controller.addOnUpdate(() {
+                    torus.rotation.y = _currentRotationY;
+                    if (colourPattern.isNotEmpty) {
+                      final newColor = _getGlowColor();
+                      material.color = three.Color.fromHex32(newColor.value);
+                      material.emissive = three.Color.fromHex32(newColor.value);
+                    }
+                  });
                 },
               ),
             ),
-            // Helper text
-            Padding(
-              padding: const EdgeInsets.only(top: 12),
-              child: Text(
-                'Tap colors below to edit or remove',
-                style: TextStyle(
-                  color: Colors.white.withOpacity(0.5),
-                  fontSize: 12,
-                ),
-                textAlign: TextAlign.center,
-              ),
-            ),
-          ],
+          ),
         ),
-      );
-    },
+        // Color pattern indicator below view
+        const SizedBox(height: 16),
+        Container(
+          height: 60,
+          decoration: BoxDecoration(
+            color: const Color(0xFF1A1A1A),
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: ListView.builder(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.all(8),
+            itemCount: colourPattern.length,
+            itemBuilder: (context, index) {
+              return GestureDetector(
+                onTap: () {
+                  HapticFeedback.lightImpact();
+                  _showColorOptions(index);
+                },
+                child: Container(
+                  width: 44,
+                  margin: const EdgeInsets.symmetric(horizontal: 4),
+                  decoration: BoxDecoration(
+                    color: colourPattern[index],
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: Colors.white.withOpacity(0.3),
+                      width: 2,
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: colourPattern[index].withOpacity(0.5),
+                        blurRadius: 8,
+                        spreadRadius: 1,
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        // Helper text
+        Padding(
+          padding: const EdgeInsets.only(top: 12),
+          child: Text(
+            'Drag to rotate • Pinch to zoom',
+            style: TextStyle(
+              color: Colors.white.withOpacity(0.5),
+              fontSize: 12,
+            ),
+            textAlign: TextAlign.center,
+          ),
+        ),
+      ],
+    ),
   );
 }
-
-  cube.Mesh _createProceduralMesh() {
-    // Create different shapes based on transition type
-    final vertices = <cube.Vector3>[];
-    final texcoords = <Offset>[];
-    final indices = <cube.Polygon>[];
-
-    switch (_selectedTransition) {
-      case 'pulse':
-      case 'breathe':
-      case 'heartbeat':
-        _createSphere(vertices, texcoords, indices);
-        break;
-      case 'strobe':
-      case 'blink':
-      case 'instant':
-        _createCube(vertices, texcoords, indices);
-        break;
-      case 'bounce':
-      case 'smooth':
-      case 'fade':
-        _createTorus(vertices, texcoords, indices);
-        break;
-      case 'sparkle':
-        _createDiamond(vertices, texcoords, indices);
-        break;
-      default:
-        _createSphere(vertices, texcoords, indices);
-    }
-
-    return cube.Mesh(
-      vertices: vertices,
-      texcoords: texcoords,
-      indices: indices,
-    );
-  }
-
-  void _createCube(List<cube.Vector3> vertices, List<Offset> texcoords, List<cube.Polygon> indices) {
-    const double size = 2.0;
-    final cubeVertices = [
-      // Front face
-      cube.Vector3(-size, -size, size), cube.Vector3(size, -size, size), cube.Vector3(size, size, size), cube.Vector3(-size, size, size),
-      // Back face
-      cube.Vector3(-size, -size, -size), cube.Vector3(-size, size, -size), cube.Vector3(size, size, -size), cube.Vector3(size, -size, -size),
-      // Top face
-      cube.Vector3(-size, size, -size), cube.Vector3(-size, size, size), cube.Vector3(size, size, size), cube.Vector3(size, size, -size),
-      // Bottom face
-      cube.Vector3(-size, -size, -size), cube.Vector3(size, -size, -size), cube.Vector3(size, -size, size), cube.Vector3(-size, -size, size),
-      // Right face
-      cube.Vector3(size, -size, -size), cube.Vector3(size, size, -size), cube.Vector3(size, size, size), cube.Vector3(size, -size, size),
-      // Left face
-      cube.Vector3(-size, -size, -size), cube.Vector3(-size, -size, size), cube.Vector3(-size, size, size), cube.Vector3(-size, size, -size),
-    ];
-
-    vertices.addAll(cubeVertices);
-
-    for (int i = 0; i < 6; i++) {
-      texcoords.addAll([
-        const Offset(0, 0), const Offset(1, 0), const Offset(1, 1), const Offset(0, 1),
-      ]);
-    }
-
-    for (int i = 0; i < 6; i++) {
-      int offset = i * 4;
-      indices.add(cube.Polygon(offset, offset + 1, offset + 2));
-      indices.add(cube.Polygon(offset, offset + 2, offset + 3));
-    }
-  }
-
-  void _createSphere(List<cube.Vector3> vertices, List<Offset> texcoords, List<cube.Polygon> indices) {
-    const int latitudeBands = 20;
-    const int longitudeBands = 20;
-    const double radius = 2.0;
-
-    for (int lat = 0; lat <= latitudeBands; lat++) {
-      double theta = lat * math.pi / latitudeBands;
-      double sinTheta = math.sin(theta);
-      double cosTheta = math.cos(theta);
-
-      for (int lon = 0; lon <= longitudeBands; lon++) {
-        double phi = lon * 2 * math.pi / longitudeBands;
-        double sinPhi = math.sin(phi);
-        double cosPhi = math.cos(phi);
-
-        double x = cosPhi * sinTheta;
-        double y = cosTheta;
-        double z = sinPhi * sinTheta;
-
-        vertices.add(cube.Vector3(radius * x, radius * y, radius * z));
-        texcoords.add(Offset(1 - (lon / longitudeBands), 1 - (lat / latitudeBands)));
-      }
-    }
-
-    for (int lat = 0; lat < latitudeBands; lat++) {
-      for (int lon = 0; lon < longitudeBands; lon++) {
-        int first = (lat * (longitudeBands + 1)) + lon;
-        int second = first + longitudeBands + 1;
-
-        indices.add(cube.Polygon(first, second, first + 1));
-        indices.add(cube.Polygon(second, second + 1, first + 1));
-      }
-    }
-  }
-
-  void _createTorus(List<cube.Vector3> vertices, List<Offset> texcoords, List<cube.Polygon> indices) {
-    const int segments = 30;
-    const int tubes = 20;
-    const double radius = 2.0;
-    const double tubeRadius = 0.6;
-
-    for (int i = 0; i <= segments; i++) {
-      double u = i / segments * 2 * math.pi;
-      for (int j = 0; j <= tubes; j++) {
-        double v = j / tubes * 2 * math.pi;
-
-        double x = (radius + tubeRadius * math.cos(v)) * math.cos(u);
-        double y = (radius + tubeRadius * math.cos(v)) * math.sin(u);
-        double z = tubeRadius * math.sin(v);
-
-        vertices.add(cube.Vector3(x, y, z));
-        texcoords.add(Offset(i / segments, j / tubes));
-      }
-    }
-
-    for (int i = 0; i < segments; i++) {
-      for (int j = 0; j < tubes; j++) {
-        int first = i * (tubes + 1) + j;
-        int second = first + tubes + 1;
-
-        indices.add(cube.Polygon(first, second, first + 1));
-        indices.add(cube.Polygon(second, second + 1, first + 1));
-      }
-    }
-  }
-
-  void _createDiamond(List<cube.Vector3> vertices, List<Offset> texcoords, List<cube.Polygon> indices) {
-    const double size = 2.0;
-
-    // Diamond/octahedron vertices
-    vertices.addAll([
-      cube.Vector3(0, size, 0),      // Top
-      cube.Vector3(size, 0, 0),      // Right
-      cube.Vector3(0, 0, size),      // Front
-      cube.Vector3(-size, 0, 0),     // Left
-      cube.Vector3(0, 0, -size),     // Back
-      cube.Vector3(0, -size, 0),     // Bottom
-    ]);
-
-    for (int i = 0; i < 6; i++) {
-      texcoords.add(const Offset(0.5, 0.5));
-    }
-
-    // 8 triangular faces
-    indices.addAll([
-      cube.Polygon(0, 1, 2),  // Top front right
-      cube.Polygon(0, 2, 3),  // Top front left
-      cube.Polygon(0, 3, 4),  // Top back left
-      cube.Polygon(0, 4, 1),  // Top back right
-      cube.Polygon(5, 2, 1),  // Bottom front right
-      cube.Polygon(5, 3, 2),  // Bottom front left
-      cube.Polygon(5, 4, 3),  // Bottom back left
-      cube.Polygon(5, 1, 4),  // Bottom back right
-    ]);
-  }
-
-  double _getScaleFactor() {
-    // Pulse the scale based on transition type
-    double baseScale = 1.0;
-    double animValue = _glowController.value;
-
-    switch (_selectedTransition) {
-      case 'pulse':
-        return baseScale + 0.3 * math.sin(animValue * 2 * math.pi);
-      case 'breathe':
-        return baseScale + 0.2 * math.sin(animValue * math.pi);
-      case 'heartbeat':
-        double beat = animValue % 0.5;
-        return baseScale + 0.4 * (beat < 0.25 ? beat * 4 : (0.5 - beat) * 4);
-      case 'bounce':
-        return baseScale + 0.25 * (animValue * animValue);
-      case 'strobe':
-      case 'blink':
-        return animValue % 0.5 < 0.25 ? baseScale * 1.3 : baseScale;
-      default:
-        return baseScale;
-    }
-  }
 
   void _showColorOptions(int index) {
     showModalBottomSheet(
