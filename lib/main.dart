@@ -11,7 +11,209 @@ import 'package:usb_serial/usb_serial.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
-import 'package:three_js/three_js.dart' as three;
+import 'package:flutter_cube/flutter_cube.dart';
+
+// 3D LED Ring Viewer Widget using flutter_cube
+class LEDRing3DViewer extends StatefulWidget {
+  final List<Color> colors;
+  final Color glowColor;
+
+  const LEDRing3DViewer({
+    super.key,
+    required this.colors,
+    required this.glowColor,
+  });
+
+  @override
+  State<LEDRing3DViewer> createState() => _LEDRing3DViewerState();
+}
+
+class _LEDRing3DViewerState extends State<LEDRing3DViewer> with SingleTickerProviderStateMixin {
+  Object? _ledRingObject;
+  Object? _ledsObject;
+  Scene? _scene;
+  
+  // Rotation state
+  double _rotationX = -20;
+  double _rotationY = 0;
+  
+  // Momentum animation
+  late AnimationController _momentumController;
+  double _velocityX = 0;
+  double _velocityY = 0;
+  Offset? _lastPanPosition;
+  DateTime? _lastPanTime;
+  
+  // Zoom state
+  double _zoom = 1.0;
+  double _baseZoom = 1.0;
+
+  @override
+  void initState() {
+    super.initState();
+    _momentumController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 2000),
+    )..addListener(_applyMomentum);
+  }
+
+  @override
+  void dispose() {
+    _momentumController.dispose();
+    super.dispose();
+  }
+
+  void _applyMomentum() {
+    if (_momentumController.isAnimating) {
+      // Apply decaying velocity with easeOut curve for natural feel
+      final t = _momentumController.value;
+      final decay = 1.0 - (t * t); // Quadratic easeOut decay
+      final currentVelocityX = _velocityX * decay;
+      final currentVelocityY = _velocityY * decay;
+      
+      setState(() {
+        _rotationY += currentVelocityY * 0.001; // Slower momentum
+        _rotationX += currentVelocityX * 0.001;
+        _updateObjectRotations();
+      });
+    }
+  }
+
+  void _updateObjectRotations() {
+    print('🔧 UPDATE ROTATIONS: ledRing=${_ledRingObject != null}, leds=${_ledsObject != null}, scene=${_scene != null}');
+    if (_ledRingObject != null) {
+      _ledRingObject!.rotation.setValues(_rotationX, _rotationY, 0);
+      _ledRingObject!.updateTransform();
+      print('🔧 LedRing rotation set to: ${_ledRingObject!.rotation}');
+    }
+    if (_ledsObject != null) {
+      _ledsObject!.rotation.setValues(_rotationX, _rotationY, 0);
+      _ledsObject!.updateTransform();
+      print('🔧 Leds rotation set to: ${_ledsObject!.rotation}');
+    }
+    _scene?.update();
+  }
+
+  void _onSceneCreated(Scene scene) {
+    print('🎬 SCENE CREATED');
+    _scene = scene;
+    // Set up camera for better viewing angle
+    scene.camera.position.z = _zoom;
+    scene.camera.position.y = 0.5;
+    
+    // Load the LED ring model (the base/housing)
+    _ledRingObject = Object(fileName: 'assets/ledring.obj', isAsset: true);
+    _ledRingObject!.rotation.setValues(_rotationX, _rotationY, 0);
+    scene.world.add(_ledRingObject!);
+    print('🎬 LedRing object added');
+    
+    // Load the LEDs model
+    _ledsObject = Object(fileName: 'assets/leds.obj', isAsset: true);
+    _ledsObject!.rotation.setValues(_rotationX, _rotationY, 0);
+    scene.world.add(_ledsObject!);
+    print('🎬 Leds object added');
+    
+    // Apply initial glow color to LEDs
+    _updateLEDColor();
+  }
+
+  void _updateLEDColor() {
+    if (_ledsObject?.mesh != null) {
+      final mesh = _ledsObject!.mesh;
+      // Convert Flutter Color to Vector3 (RGB normalized to 0-1)
+      final r = widget.glowColor.red / 255.0;
+      final g = widget.glowColor.green / 255.0;
+      final b = widget.glowColor.blue / 255.0;
+      // Set the LED material to glow with the selected color
+      mesh.material.ambient.setValues(r, g, b);
+      mesh.material.diffuse.setValues(r, g, b);
+    }
+  }
+
+  void _onScaleStart(ScaleStartDetails details) {
+    print('🟢 SCALE START: focalPoint=${details.focalPoint}, pointerCount=${details.pointerCount}');
+    _momentumController.stop();
+    _lastPanPosition = details.focalPoint;
+    _lastPanTime = DateTime.now();
+    _velocityX = 0;
+    _velocityY = 0;
+    _baseZoom = _zoom;
+  }
+
+  void _onScaleUpdate(ScaleUpdateDetails details) {
+    final now = DateTime.now();
+    final delta = details.focalPoint - (_lastPanPosition ?? details.focalPoint);
+    final dt = _lastPanTime != null 
+        ? now.difference(_lastPanTime!).inMilliseconds / 1000.0 
+        : 0.016;
+    
+    print('🔵 SCALE UPDATE: delta=$delta, pointerCount=${details.pointerCount}, rotX=$_rotationX, rotY=$_rotationY');
+    
+    // Handle rotation (single finger drag)
+    if (details.pointerCount == 1) {
+      if (dt > 0 && dt < 0.1) {
+        // Calculate velocity with smoothing (exponential moving average)
+        // Signs must match the rotation direction below
+        final newVelocityY = delta.dx / dt;
+        final newVelocityX = delta.dy / dt;
+        _velocityY = _velocityY * 0.5 + newVelocityY * 0.5;
+        _velocityX = _velocityX * 0.5 + newVelocityX * 0.5;
+      }
+      
+      setState(() {
+        _rotationY += delta.dx * 0.15;
+        _rotationX += delta.dy * 0.15;
+        print('🟡 ROTATION APPLIED: rotX=$_rotationX, rotY=$_rotationY');
+        _updateObjectRotations();
+      });
+    }
+    
+    // Handle zoom (pinch)
+    if (details.pointerCount >= 2) {
+      setState(() {
+        _zoom = (_baseZoom / details.scale).clamp(0.5, 3.0);
+        _scene?.camera.position.z = _zoom;
+        _scene?.update();
+      });
+    }
+    
+    _lastPanPosition = details.focalPoint;
+    _lastPanTime = now;
+  }
+
+  void _onScaleEnd(ScaleEndDetails details) {
+    print('🔴 SCALE END: velocityX=$_velocityX, velocityY=$_velocityY');
+    // Apply momentum if there's any velocity (lowered threshold)
+    if (_velocityX.abs() > 50 || _velocityY.abs() > 50) {
+      _momentumController.forward(from: 0);
+    }
+  }
+
+  @override
+  void didUpdateWidget(LEDRing3DViewer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.glowColor != widget.glowColor) {
+      _updateLEDColor();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onScaleStart: _onScaleStart,
+      onScaleUpdate: _onScaleUpdate,
+      onScaleEnd: _onScaleEnd,
+      child: Container(
+        color: const Color(0xFF0A0A0A),
+        child: Cube(
+          interactive: false, // Disable Cube's internal gesture handling
+          onSceneCreated: _onSceneCreated,
+        ),
+      ),
+    );
+  }
+}
 
 void main() {
   runApp(const MyApp());
@@ -488,13 +690,7 @@ class _PatternCreatorScreenState extends State<PatternCreatorScreen> with Ticker
   int _editingColorIndex = -1; // -1 means adding new, >=0 means editing existing
   int _logoTapCount = 0;
   DateTime? _lastLogoTap;
-  final int _tick = 0; // For forcing rebuilds on animation
-  Timer? _renderTimer; // For 60fps rendering
-  final ValueNotifier<int> _renderTick = ValueNotifier<int>(0); // For triggering rebuilds
-  int _renderCounter = 0; // Counter for render ticks
-
-  // References for 3D renderer
-  double _currentRotationY = 0;
+  double _rotationAngle = 0;
 
   @override
   bool get wantKeepAlive => true;
@@ -508,7 +704,6 @@ class _PatternCreatorScreenState extends State<PatternCreatorScreen> with Ticker
     {'id': 'breathe', 'name': 'Breathe'},
     {'id': 'blink', 'name': 'Blink'},
     {'id': 'heartbeat', 'name': 'Heartbeat'},
-    {'id': 'smooth', 'name': 'Smooth'},
     {'id': 'sparkle', 'name': 'Sparkle'},
     {'id': 'color_wheel', 'name': 'Rainbow'},
   ];
@@ -524,21 +719,11 @@ class _PatternCreatorScreenState extends State<PatternCreatorScreen> with Ticker
     )..repeat();
 
     // Do not pre-populate colours on startup; start with an empty pattern
-
-    // Start render timer for rotation
-    _renderTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
-      if (mounted) {
-        setState(() {
-          _currentRotationY += 0.02; // Radians per frame
-        });
-      }
-    });
   }
 
   @override
   void dispose() {
     _glowController.dispose();
-    _renderTimer?.cancel();
     super.dispose();
   }
 
@@ -727,11 +912,7 @@ class _PatternCreatorScreenState extends State<PatternCreatorScreen> with Ticker
           );
         }
 
-        return AnimatedBuilder(
-          animation: _glowController,
-          builder: (context, child) {
-            final glowColor = _getGlowColor();
-            return GestureDetector(
+        return GestureDetector(
               onTap: () async {
                 HapticFeedback.lightImpact();
                 if (isConnected) {
@@ -753,15 +934,6 @@ class _PatternCreatorScreenState extends State<PatternCreatorScreen> with Ticker
                     color: isConnected ? const Color(0xFF00CC00) : Colors.red,
                     width: 2,
                   ),
-                  boxShadow: isConnected
-                      ? null
-                      : [
-                          BoxShadow(
-                            color: glowColor.withOpacity(0.4),
-                            blurRadius: 12,
-                            spreadRadius: 2,
-                          ),
-                        ],
                 ),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
@@ -783,8 +955,6 @@ class _PatternCreatorScreenState extends State<PatternCreatorScreen> with Ticker
                 ),
               ),
             );
-          },
-        );
       },
     );
   }
@@ -897,44 +1067,87 @@ class _PatternCreatorScreenState extends State<PatternCreatorScreen> with Ticker
   }
 
   Widget _buildRainbowWheel() {
-    return Center(
+    // Rainbow colors for the animation
+    final rainbowColors = [
+      Colors.red,
+      Colors.orange,
+      Colors.yellow,
+      Colors.green,
+      Colors.cyan,
+      Colors.blue,
+      Colors.purple,
+      Colors.pink,
+    ];
+    
+    return Container(
+      padding: const EdgeInsets.all(16),
       child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Container(
-            width: 200,
-            height: 200,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              gradient: const SweepGradient(
-                colors: [
-                  Colors.red,
-                  Colors.orange,
-                  Colors.yellow,
-                  Colors.green,
-                  Colors.cyan,
-                  Colors.blue,
-                  Colors.purple,
-                  Colors.pink,
-                  Colors.red,
-                ],
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.purple.withOpacity(0.5),
-                  blurRadius: 30,
-                  spreadRadius: 10,
-                ),
-              ],
+          Expanded(
+            child: AnimatedBuilder(
+              animation: _glowController,
+              builder: (context, child) {
+                // Calculate current rainbow color based on animation
+                final t = _glowController.value;
+                final index = (t * rainbowColors.length).floor() % rainbowColors.length;
+                final nextIndex = (index + 1) % rainbowColors.length;
+                final localT = (t * rainbowColors.length) - index;
+                final glowColor = Color.lerp(rainbowColors[index], rainbowColors[nextIndex], localT)!;
+                
+                return Container(
+                  decoration: BoxDecoration(
+                    gradient: RadialGradient(
+                      center: Alignment.center,
+                      radius: 0.8,
+                      colors: [
+                        glowColor.withOpacity(0.3),
+                        glowColor.withOpacity(0.1),
+                        const Color(0xFF0A0A0A),
+                      ],
+                      stops: const [0.0, 0.4, 1.0],
+                    ),
+                    borderRadius: BorderRadius.circular(24),
+                    border: Border.all(
+                      color: glowColor.withOpacity(0.3),
+                      width: 2,
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: glowColor.withOpacity(0.4),
+                        blurRadius: 30,
+                        spreadRadius: 10,
+                      ),
+                    ],
+                  ),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(22),
+                    child: LEDRing3DViewer(
+                      colors: rainbowColors,
+                      glowColor: glowColor,
+                    ),
+                  ),
+                );
+              },
             ),
           ),
-          const SizedBox(height: 24),
+          const SizedBox(height: 12),
           Text(
             'Rainbow Mode',
             style: TextStyle(
               color: Colors.grey.shade400,
-              fontSize: 20,
+              fontSize: 16,
               fontWeight: FontWeight.w600,
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text(
+              'Drag to rotate • Pinch to zoom',
+              style: TextStyle(
+                color: Colors.white.withOpacity(0.4),
+                fontSize: 11,
+              ),
+              textAlign: TextAlign.center,
             ),
           ),
         ],
@@ -974,73 +1187,86 @@ Widget _build3DVisualization() {
   final currentColor = colourPattern.isEmpty ? Colors.grey : _getGlowColor();
 
   return Container(
-    padding: const EdgeInsets.all(24),
+    padding: const EdgeInsets.all(16),
     child: Column(
       children: [
-        // 3D LED Ring visualization
+        // 3D LED Ring Model
         Expanded(
-          child: Container(
-            decoration: BoxDecoration(
-              color: Colors.black.withOpacity(0.3),
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(
-                color: currentColor.withOpacity(0.3),
-                width: 2,
-              ),
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(18),
-              child: three.ThreeJS(
-                onCreated: (three.ThreeController controller) {
-                  // Scene setup
-                  controller.scene.background = three.Color.fromHex32(0x000000);
-                  
-                  // Add lights
-                  final ambientLight = three.AmbientLight(0xffffff, 0.5);
-                  controller.scene.add(ambientLight);
-                  
-                  final pointLight = three.PointLight(0xffffff, 1.0);
-                  pointLight.position.set(5, 5, 5);
-                  controller.scene.add(pointLight);
-                  
-                  // Create torus geometry for LED ring
-                  final geometry = three.TorusGeometry(2, 0.5, 16, 32);
-                  final material = three.MeshStandardMaterial(
-                    color: three.Color.fromHex32(currentColor.value),
-                    emissive: three.Color.fromHex32(currentColor.value),
-                    emissiveIntensity: 0.5,
-                  );
-                  final torus = three.Mesh(geometry, material);
-                  controller.scene.add(torus);
-                  
-                  // Camera position
-                  controller.camera.position.set(0, 0, 8);
-                  controller.camera.lookAt(controller.scene.position);
-                  
-                  // Rotate the torus
-                  torus.rotation.y = _currentRotationY;
-                  
-                  // Animation loop to update rotation
-                  controller.addOnUpdate(() {
-                    torus.rotation.y = _currentRotationY;
-                    if (colourPattern.isNotEmpty) {
-                      final newColor = _getGlowColor();
-                      material.color = three.Color.fromHex32(newColor.value);
-                      material.emissive = three.Color.fromHex32(newColor.value);
-                    }
-                  });
-                },
-              ),
-            ),
+          child: AnimatedBuilder(
+            animation: _glowController,
+            builder: (context, child) {
+              final glowColor = _getGlowColor();
+              return Container(
+                decoration: BoxDecoration(
+                  gradient: RadialGradient(
+                    center: Alignment.center,
+                    radius: 0.8,
+                    colors: [
+                      glowColor.withOpacity(0.2),
+                      glowColor.withOpacity(0.05),
+                      const Color(0xFF0A0A0A),
+                    ],
+                    stops: const [0.0, 0.4, 1.0],
+                  ),
+                  borderRadius: BorderRadius.circular(24),
+                  border: Border.all(
+                    color: glowColor.withOpacity(0.3),
+                    width: 2,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: glowColor.withOpacity(0.3),
+                      blurRadius: 40,
+                      spreadRadius: 10,
+                    ),
+                  ],
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(22),
+                  child: Stack(
+                    children: [
+                      // 3D LED Ring Viewer
+                      LEDRing3DViewer(
+                        colors: colourPattern,
+                        glowColor: glowColor,
+                      ),
+                      // Color overlay for glow effect
+                      Positioned.fill(
+                        child: IgnorePointer(
+                          child: Container(
+                            decoration: BoxDecoration(
+                              gradient: RadialGradient(
+                                center: Alignment.center,
+                                radius: 0.6,
+                                colors: [
+                                  glowColor.withOpacity(0.0),
+                                  glowColor.withOpacity(0.1),
+                                  glowColor.withOpacity(0.2),
+                                ],
+                                stops: const [0.3, 0.6, 1.0],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
           ),
         ),
         // Color pattern indicator below view
-        const SizedBox(height: 16),
+        const SizedBox(height: 12),
         Container(
-          height: 60,
+          height: 56,
           decoration: BoxDecoration(
             color: const Color(0xFF1A1A1A),
             borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: currentColor.withOpacity(0.2),
+              width: 1,
+            ),
           ),
           child: ListView.builder(
             scrollDirection: Axis.horizontal,
@@ -1053,19 +1279,27 @@ Widget _build3DVisualization() {
                   _showColorOptions(index);
                 },
                 child: Container(
-                  width: 44,
+                  width: 40,
                   margin: const EdgeInsets.symmetric(horizontal: 4),
                   decoration: BoxDecoration(
-                    color: colourPattern[index],
-                    borderRadius: BorderRadius.circular(12),
+                    gradient: RadialGradient(
+                      center: const Alignment(-0.3, -0.3),
+                      radius: 1.2,
+                      colors: [
+                        Color.lerp(colourPattern[index], Colors.white, 0.3)!,
+                        colourPattern[index],
+                        Color.lerp(colourPattern[index], Colors.black, 0.3)!,
+                      ],
+                    ),
+                    borderRadius: BorderRadius.circular(10),
                     border: Border.all(
-                      color: Colors.white.withOpacity(0.3),
-                      width: 2,
+                      color: Colors.white.withOpacity(0.2),
+                      width: 1,
                     ),
                     boxShadow: [
                       BoxShadow(
                         color: colourPattern[index].withOpacity(0.5),
-                        blurRadius: 8,
+                        blurRadius: 10,
                         spreadRadius: 1,
                       ),
                     ],
@@ -1077,12 +1311,12 @@ Widget _build3DVisualization() {
         ),
         // Helper text
         Padding(
-          padding: const EdgeInsets.only(top: 12),
+          padding: const EdgeInsets.only(top: 8),
           child: Text(
-            'Drag to rotate • Pinch to zoom',
+            'Drag to rotate • Pinch to zoom • Tap colors to edit',
             style: TextStyle(
-              color: Colors.white.withOpacity(0.5),
-              fontSize: 12,
+              color: Colors.white.withOpacity(0.4),
+              fontSize: 11,
             ),
             textAlign: TextAlign.center,
           ),
